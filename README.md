@@ -203,3 +203,10 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
 python -m backend.ml.nslkdd           # model must exist in ./models before using detection
 ```
 PostgreSQL DDL: `db/schema.sql`. Kibana: http://127.0.0.1:5601 → create a data view on `securework-events*`. Config via env: `POSTGRES_*` or `SECUREWORK_DATABASE_URL`, `SECUREWORK_JWT_SECRET`, `SECUREWORK_ES_URL`.
+
+## Desktop: live rule-based IDS, secure workspace window, protocol chart
+
+- **Live rule-based IDS** (`app/security/rule_ids.py`): starts automatically when packet monitoring starts and detects port scans, SYN floods and abnormal packet rates from live packet metadata, with a per-rule cooldown to avoid duplicate alerts. It is a heuristic detector, **not** the ML model, whose live inference stays gated (see above). Thresholds are conservative defaults to tune per network. Alerts appear on the dashboard and in `logs/securework_ai.log`.
+- **Live packets by protocol** pie chart on the dashboard (TCP/UDP/other, from the same capture).
+- **Secure Workspace window** (`app/ui/workspace_window.py`): opens as a separate window after login and launches only apps listed in `config/workspace_apps.json` (copy `config/workspace_apps.example.json`). Missing or malformed config means no apps (fail closed). It is a launcher, not OS-level isolation: it does not block programs started outside SecureWork AI.
+- Tested: `tests/test_rule_ids_and_workspace.py` (9 tests) and an offscreen Qt smoke run on Linux. Not tested on Windows with real Npcap capture or real approved apps.

@@ -6,6 +6,7 @@ from app.security.network_monitor import NetworkMonitor
 from app.security.usb_checker import USBAdapterChecker
 from app.ui.dashboard_window import DashboardWindow
 from app.ui.login_window import LoginWindow
+from app.ui.workspace_window import WorkspaceWindow
 from app.utils.logging_config import configure_logging
 
 
@@ -34,6 +35,7 @@ class SecureWorkApplication:
         self.network_monitor = NetworkMonitor(usb_checker=self.usb_checker)
         self.login_window = LoginWindow(self.show_dashboard)
         self.dashboard_window = None
+        self.workspace_window = None
 
     def show_dashboard(self) -> None:
         self.login_window.hide()
@@ -43,11 +45,16 @@ class SecureWorkApplication:
             network_monitor=self.network_monitor,
         )
         self.dashboard_window.show()
+        self.workspace_window = WorkspaceWindow()
+        self.workspace_window.show()
 
     def logout(self) -> None:
         logging.getLogger(__name__).info("User logged out")
         if self.network_monitor.is_active():
             self.network_monitor.stop_capture()
+        if self.workspace_window is not None:
+            self.workspace_window.close()
+            self.workspace_window = None
         if self.dashboard_window is not None:
             self.dashboard_window.close()
             self.dashboard_window = None

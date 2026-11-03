@@ -48,3 +48,4 @@ Thumbs.db
 # Backend runtime data (datasets, DB, event logs); metrics report is committed
 !models/nslkdd_metrics.json
 logs/*.jsonl
+config/workspace_apps.json
