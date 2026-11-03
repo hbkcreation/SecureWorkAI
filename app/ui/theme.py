@@ -90,6 +90,13 @@ QLabel#chip {{ border-radius: 10px; padding: 3px 11px; font-size: 12px; font-wei
 QLabel#chip[state="ok"] {{ background: {g('ok_bg')}; color: {g('ok')}; border: 1px solid {g('ok_bg')}; }}
 QLabel#chip[state="warn"] {{ background: {g('warn_bg')}; color: {g('warn')}; border: 1px solid {g('warn_bg')}; }}
 QLabel#chip[state="bad"] {{ background: {g('bad_bg')}; color: {g('bad')}; border: 1px solid {g('bad_bg')}; }}
+QFrame#alertBanner {{ background: {g('bad_bg')}; border: 1px solid {g('bad')}; border-radius: 10px; }}
+QFrame#alertBanner QLabel {{ color: {g('bad')}; font-weight: 600; background: transparent; }}
+QPushButton#alertButton {{ background: {g('bad')}; color: #ffffff; }}
+QPushButton#alertButton:hover {{ background: {g('bad')}; }}
+QPushButton#alertGhost {{ background: transparent; color: {g('bad')}; border: 1px solid {g('bad')}; }}
+QDialog#alertDialog {{ background: {g('surface')}; }}
+QLabel#alertTitle {{ font-size: 18px; font-weight: 700; color: {g('bad')}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: {g('border')}; border-radius: 4px; min-height: 30px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
