@@ -78,3 +78,27 @@ class WorkspaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiscoveryAndSaveTests(unittest.TestCase):
+    def test_discovery_filters_and_dedups(self):
+        from app.security.app_discovery import discover_installed_apps
+        raw = [
+            ("Chrome", r"C:\Program Files\Google\Chrome\chrome.exe"),
+            ("Chrome dup", r'"C:\Program Files\Google\Chrome\chrome.exe",0'),
+            ("Uninstaller", r"C:\x\unins000.exe"),
+            ("Missing", r"C:\nope\missing.exe"),
+            ("Not exe", r"C:\x\readme.txt"),
+            ("", r"C:\Tools\zed.exe"),
+        ]
+        have = {r"c:\program files\google\chrome\chrome.exe", r"c:\tools\zed.exe"}
+        apps = discover_installed_apps(raw, exists=lambda p: p.lower() in have)
+        self.assertEqual([(a.name, a.command) for a in apps],
+                         [("Chrome", r"C:\Program Files\Google\Chrome\chrome.exe"), ("zed", r"C:\Tools\zed.exe")])
+
+    def test_save_roundtrip(self):
+        from app.security.workspace_apps import save_workspace_apps
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "sub", "w.json")
+        save_workspace_apps([WorkspaceApp("A", "a.exe")], p)
+        self.assertEqual(load_workspace_apps(p), [WorkspaceApp("A", "a.exe")])
