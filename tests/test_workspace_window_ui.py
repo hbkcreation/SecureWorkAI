@@ -59,3 +59,37 @@ class ThemeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExeIconTests(unittest.TestCase):
+    NPCAP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "npcap-1.89.exe")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qapp = QApplication.instance() or QApplication([])
+
+    def test_extracts_real_icon_from_exe(self):
+        from app.security.exe_icon import extract_icon_ico
+        if not os.path.isfile(self.NPCAP):
+            self.skipTest("npcap installer not present")
+        ico = extract_icon_ico(self.NPCAP)
+        self.assertIsNotNone(ico)
+        self.assertEqual(ico[:4], b"\x00\x00\x01\x00")
+
+    def test_pixmap_uses_exe_icon_not_letter_tile(self):
+        from app.ui.workspace_window import _exe_icon_pixmap
+        if not os.path.isfile(self.NPCAP):
+            self.skipTest("npcap installer not present")
+        pm = _exe_icon_pixmap(self.NPCAP, 40)
+        self.assertIsNotNone(pm)
+        self.assertFalse(pm.isNull())
+
+    def test_non_pe_and_garbage_files_return_none(self):
+        from app.security.exe_icon import extract_icon_ico
+        import tempfile
+        for content in (b"", b"MZ" + b"\x00" * 5000, os.urandom(4096), b"hello world" * 500):
+            with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
+                f.write(content)
+            self.addCleanup(os.unlink, f.name)
+            self.assertIsNone(extract_icon_ico(f.name))
+        self.assertIsNone(extract_icon_ico("/nonexistent/app.exe"))

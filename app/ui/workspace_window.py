@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QFileIconProvider, QFrame, QHBoxLayout, QLabel, Q
                                QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from app.security.app_discovery import discover_installed_apps
+from app.security.exe_icon import extract_icon_ico
 from app.security.workspace_apps import (DEFAULT_CONFIG, WorkspaceApp, launch, load_workspace_apps,
                                          save_workspace_apps)
 from app.ui import theme
@@ -25,16 +26,40 @@ _TILE_COLORS = ["#2563eb", "#7c3aed", "#0d9488", "#d97706", "#db2777", "#0891b2"
 _provider: QFileIconProvider | None = None
 
 
-def app_icon_pixmap(app: WorkspaceApp, size: int = 40) -> QPixmap:
-    """The program's own icon when Windows provides one, else a coloured letter tile."""
-    global _provider
-    if os.path.isfile(app.command):
+_icon_cache: dict[tuple[str, float, int], QPixmap] = {}
+
+
+def _exe_icon_pixmap(path: str, size: int) -> QPixmap | None:
+    """The icon stored inside the program file itself (what Windows shows for it)."""
+    try:
+        key = (path, os.path.getmtime(path), size)
+    except OSError:
+        return None
+    if key in _icon_cache:
+        return _icon_cache[key]
+    pm = None
+    ico = extract_icon_ico(path)
+    if ico:
+        loaded = QPixmap()
+        if loaded.loadFromData(ico, "ICO") and not loaded.isNull():
+            pm = loaded.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    if pm is None and sys.platform == "win32":  # fall back to the Windows shell icon
+        global _provider
         _provider = _provider or QFileIconProvider()
-        icon = _provider.icon(QFileInfo(app.command))
+        icon = _provider.icon(QFileInfo(path))
         if not icon.isNull():
-            pm = icon.pixmap(QSize(size, size))
-            if not pm.isNull() and sys.platform == "win32":  # generic icons off-Windows look wrong, so use the tile
-                return pm
+            shell = icon.pixmap(QSize(size, size))
+            pm = shell if not shell.isNull() else None
+    _icon_cache[key] = pm
+    return pm
+
+
+def app_icon_pixmap(app: WorkspaceApp, size: int = 40) -> QPixmap:
+    """The program's real icon, or a coloured letter tile when it has none."""
+    if os.path.isfile(app.command):
+        pm = _exe_icon_pixmap(app.command, size)
+        if pm is not None:
+            return pm
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
