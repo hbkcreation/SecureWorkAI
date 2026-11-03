@@ -6,6 +6,7 @@ from app.security.network_monitor import NetworkMonitor
 from app.security.usb_checker import USBAdapterChecker
 from app.ui.dashboard_window import DashboardWindow
 from app.ui.login_window import LoginWindow
+from app.security.website_filter import SystemProxy
 from app.ui import theme
 from app.ui.widgets import app_icon
 from app.utils.logging_config import configure_logging
@@ -47,6 +48,10 @@ class SecureWorkApplication:
 
 def main() -> int:
     configure_logging()
+    try:
+        SystemProxy().restore()  # a crash may have left the website-filter proxy setting behind
+    except Exception:
+        logging.getLogger(__name__).exception("Could not restore proxy settings at start-up")
     logger = logging.getLogger(__name__)
     app = QApplication(sys.argv)
     app.setApplicationName("SecureWork AI")

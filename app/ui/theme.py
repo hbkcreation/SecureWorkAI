@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, QSettings, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 LIGHT = {
     "bg": "#f5f6f8", "surface": "#ffffff", "surface2": "#f0f2f5", "border": "#dfe3e8",
@@ -123,8 +123,10 @@ def apply(new_mode: str, save: bool = True) -> None:
     app = QApplication.instance()
     if app is not None:
         app.setStyleSheet(build_stylesheet())
-        for w in app.allWidgets():
-            w.update()
+        for top in app.topLevelWidgets():  # repaint only live, visible windows (skip widgets pending deletion)
+            if top.isVisible():
+                for w in [top, *top.findChildren(QWidget)]:
+                    w.update()
     if save:
         try:
             _settings().setValue("theme", _mode)

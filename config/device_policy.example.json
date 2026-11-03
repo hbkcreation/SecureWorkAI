@@ -1,3 +1,4 @@
 {
-  "approved_usb_wifi_adapters": []
+  "approved_usb_wifi_adapters": [],
+  "allow_unapproved_interface_monitoring": false
 }
