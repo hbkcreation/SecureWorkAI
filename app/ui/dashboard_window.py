@@ -6,8 +6,9 @@ import time
 from PySide6.QtCore import QObject, QPropertyAnimation, QRunnable, Qt, Signal, Slot, QThreadPool, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMainWindow, QPushButton,
-    QListWidget, QListWidgetItem, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QPushButton, QListWidget, QListWidgetItem, QScrollArea, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 from app.ml.predict import DEFAULT_MODEL_PATH
 from app.security.flow_aggregator import LiveFlowAggregator
@@ -15,6 +16,13 @@ from app.security.ids_service import FeatureCompatibilityError, IDSService
 from app.security.network_monitor import NetworkInterface, NetworkMonitor
 from app.security.rule_ids import ProtocolCounter, RuleBasedIDS
 from app.ml.live_synthetic import LiveMLAnalyzer
+from app.security.alert_email import (EmailConfig, EmailNotifier, load_config as load_email_config,
+                                      save_config as save_email_config, valid_email)
+from app.security.app_monitor import check_running, running_exe_names
+from app.security.remediation import AlertInfo
+from app.security.verification import VerificationState, is_fully_verified, run_checks
+from app.ui.alert_dialog import AlertDialog
+from app.ui.workspace_window import WorkspacePanel
 from app.ui import theme
 from app.ui.protocol_chart import ProtocolPieChart
 from app.ui.widgets import Avatar, KpiCard, LogoMark, Sparkline, Toggle, card, make_chip, set_chip
@@ -103,6 +111,18 @@ class DashboardWindow(QMainWindow):
         self.network_monitor.add_packet_callback(self.rule_ids.process_packet)
         self.network_monitor.add_packet_callback(self.protocol_counter.add)
         self._logged_rule_alerts = 0
+        self.email_config = load_email_config()
+        self.email_notifier = EmailNotifier(lambda: self.email_config)
+        if self.email_notifier.configured:
+            self.email_notifier.status = f"Email alerts: set up for {self.email_config.recipient}"
+        self.alert_history: list[AlertInfo] = []
+        self._alert_seen: dict = {}
+        self._alert_dialogs: list = []
+        self._rule_alerts_raised = 0
+        self._ml_attacks_seen = 0
+        self._full_verification = False
+        self._app_monitor_busy = False
+        self._banner_info = None
         self._usb_worker: _USBCheckWorker | None = None
         self._ids_model_worker: _ActionWorker | None = None
         self._action_workers: set[_ActionWorker] = set()
@@ -120,6 +140,8 @@ class DashboardWindow(QMainWindow):
         self._build_ui(username)
         theme.signals.changed.connect(self._on_theme_changed)
 
+        self._app_monitor_timer = QTimer(self)
+        self._app_monitor_timer.timeout.connect(self._app_monitor_tick)
         self._network_timer = QTimer(self)
         self._network_timer.timeout.connect(self._refresh_network_snapshot)
         self._network_timer.start(400)
@@ -158,7 +180,7 @@ class DashboardWindow(QMainWindow):
         sb.addLayout(brand_row)
         sb.addSpacing(22)
         self._nav_buttons: list[QPushButton] = []
-        for index, label in enumerate(["Overview", "Network", "Detection", "System"]):
+        for index, label in enumerate(["Overview", "Network", "Detection", "Apps", "Alerts", "System"]):
             btn = QPushButton(label)
             btn.setObjectName("navButton")
             btn.setCheckable(True)
@@ -212,11 +234,17 @@ class DashboardWindow(QMainWindow):
         top.addLayout(who)
         top.addWidget(Avatar(username))
         main.addLayout(top)
+        main.addWidget(self._build_alert_banner())
 
         self.pages = QStackedWidget()
         self.pages.addWidget(self._scroll(self._page_overview()))
         self.pages.addWidget(self._scroll(self._page_network()))
         self.pages.addWidget(self._scroll(self._page_detection()))
+        self.workspace_panel = WorkspacePanel()
+        self.workspace_panel.changed.connect(self._on_allowlist_changed)
+        self.workspace_panel.monitor_toggle.toggled.connect(self._toggle_app_monitor)
+        self.pages.addWidget(self.workspace_panel)
+        self.pages.addWidget(self._scroll(self._page_alerts()))
         self.pages.addWidget(self._scroll(self._page_system()))
         main.addWidget(self.pages, 1)
         outer.addLayout(main, 1)
@@ -236,7 +264,7 @@ class DashboardWindow(QMainWindow):
         self._refresh_overview()
 
     def _show_page(self, index: int) -> None:
-        names = ["Overview", "Network", "Detection", "System"]
+        names = ["Overview", "Network", "Detection", "Apps", "Alerts", "System"]
         self.pages.setCurrentIndex(index)
         self.page_title.setText(names[index])
         for i, btn in enumerate(self._nav_buttons):
@@ -438,8 +466,273 @@ class DashboardWindow(QMainWindow):
             ul.addWidget(w)
         ul.addWidget(self.usb_refresh_button, alignment=Qt.AlignLeft)
         lay.addWidget(usb_card)
+
+        verify_card, vl = card("Full verification")
+        vnote = QLabel("Runs a checklist of the protections this workspace relies on. \"Fully verified\" means every "
+                       "check passes right now; it is not a guarantee that the device is secure.")
+        vnote.setObjectName("muted")
+        vnote.setWordWrap(True)
+        self.verify_button = QPushButton("Run full verification")
+        self.verify_button.clicked.connect(self.run_full_verification)
+        self.verify_list = QListWidget()
+        self.verify_list.setMinimumHeight(210)
+        vl.addWidget(vnote)
+        vl.addWidget(self.verify_button, alignment=Qt.AlignLeft)
+        vl.addWidget(self.verify_list)
+        lay.addWidget(verify_card)
         lay.addStretch(1)
         return page
+
+    # ----------------------------------------------------------- alert mode
+    def _build_alert_banner(self) -> QFrame:
+        self.alert_banner = QFrame()
+        self.alert_banner.setObjectName("alertBanner")
+        row = QHBoxLayout(self.alert_banner)
+        row.setContentsMargins(16, 10, 12, 10)
+        tag = QLabel("ALERT MODE")
+        tag.setStyleSheet("font-size: 12px; font-weight: 800;")
+        self.alert_banner_text = QLabel("")
+        self.alert_banner_text.setWordWrap(True)
+        self.alert_banner_steps = QPushButton("What to do")
+        self.alert_banner_steps.setObjectName("alertButton")
+        self.alert_banner_steps.clicked.connect(self._open_banner_dialog)
+        dismiss = QPushButton("Dismiss")
+        dismiss.setObjectName("alertGhost")
+        dismiss.clicked.connect(self._dismiss_banner)
+        row.addWidget(tag)
+        row.addWidget(self.alert_banner_text, 1)
+        row.addWidget(self.alert_banner_steps)
+        row.addWidget(dismiss)
+        self.alert_banner.hide()
+        self._banner_info = None
+        return self.alert_banner
+
+    def raise_alert(self, info: AlertInfo, force: bool = False) -> None:
+        """Show alert mode on screen and email the user (rate limited; duplicates are suppressed)."""
+        key = (info.kind, info.source, info.target)
+        now = time.monotonic()
+        if not force and now - self._alert_seen.get(key, -1e9) < 60:
+            return
+        self._alert_seen[key] = now
+        self.alert_history.append(info)
+        self._render_alert_history()
+        self._banner_info = info
+        self.alert_banner_text.setText(f"{info.title}  ·  {info.detail}")
+        self.alert_banner.show()
+        self.setWindowTitle("⚠ ALERT | SecureWork AI")
+        if info.severity in ("high", "critical") or info.kind == "TEST":
+            self._open_alert_dialog(info)
+        QApplication.beep()
+        QApplication.alert(self, 0)
+        queued = self.email_notifier.notify(info, force=force)
+        logger.warning("ALERT %s (%s): %s | email queued: %s", info.kind, info.severity, info.detail, queued)
+
+    def _open_alert_dialog(self, info: AlertInfo) -> None:
+        self._alert_dialogs = [d for d in self._alert_dialogs if d.isVisible()][-2:]
+        dialog = AlertDialog(info, self)
+        self._alert_dialogs.append(dialog)
+        dialog.show()
+
+    def _open_banner_dialog(self) -> None:
+        if self._banner_info is not None:
+            self._open_alert_dialog(self._banner_info)
+
+    def _dismiss_banner(self) -> None:
+        self.alert_banner.hide()
+        self.setWindowTitle("SecureWork AI | Dashboard")
+
+    def _render_alert_history(self) -> None:
+        rows = [f"{time.strftime('%H:%M:%S', time.localtime(a.timestamp))}  {a.severity.upper():<9} {a.title}"
+                for a in reversed(self.alert_history[-50:])] or ["No alerts yet."]
+        self.alert_history_list.clear()
+        self.alert_history_list.addItems(rows)
+
+    def _raise_new_alerts(self) -> None:
+        titles = {"PORT_SCAN": "Port scan detected", "SYN_FLOOD": "SYN flood detected (possible DoS attack)",
+                  "HIGH_RATE": "Unusually high traffic rate"}
+        rule_alerts = self.rule_ids.alerts
+        for a in rule_alerts[self._rule_alerts_raised:]:
+            self.raise_alert(AlertInfo(a.rule, a.severity, titles.get(a.rule, a.rule), a.detail,
+                                       a.source_ip, a.target_ip, a.timestamp))
+        self._rule_alerts_raised = len(rule_alerts)
+        ml = self.ml_analyzer
+        new = ml.attack_flows - self._ml_attacks_seen
+        if new > 0:
+            ml_titles = {"port_scan": "Port scan flagged by ML", "dos_flood": "Traffic flood flagged by ML",
+                         "data_exfiltration": "Large outgoing transfer flagged by ML"}
+            for e in [e for e in ml.events if e.label != "normal"][-new:]:
+                sev = "high" if e.label in ("dos_flood", "data_exfiltration") else "medium"
+                self.raise_alert(AlertInfo(e.label.upper(), sev, ml_titles.get(e.label, e.label),
+                                           f"{e.label} ({e.probability:.0%} confidence, experimental model)",
+                                           e.source_ip, f"{e.destination_ip}:{e.destination_port}"))
+        self._ml_attacks_seen = ml.attack_flows
+
+    # ------------------------------------------------------------ alerts tab
+    def _page_alerts(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(16)
+        email_card, el = card("Email me when there is an attack")
+        note = QLabel("Alerts are emailed with plain steps to fix the problem. Your password is never saved to "
+                      "disk: type it here for this session, or set the SECUREWORK_SMTP_PASSWORD environment variable.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        el.addWidget(note)
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        cfg = self.email_config
+        self.email_to = QLineEdit(cfg.recipient)
+        self.email_to.setPlaceholderText("you@example.com")
+        self.email_host = QLineEdit(cfg.smtp_host)
+        self.email_host.setPlaceholderText("smtp.gmail.com")
+        self.email_port = QLineEdit(str(cfg.smtp_port))
+        self.email_user = QLineEdit(cfg.username)
+        self.email_user.setPlaceholderText("sender login (usually your email)")
+        self.email_pass = QLineEdit()
+        self.email_pass.setEchoMode(QLineEdit.Password)
+        self.email_pass.setPlaceholderText("password or app password (kept in memory only)")
+        self.email_ssl = QCheckBox("Use SSL (port 465) instead of STARTTLS (port 587)")
+        self.email_ssl.setChecked(cfg.use_ssl)
+        for r, (label, widget) in enumerate([("Send alerts to", self.email_to), ("SMTP server", self.email_host),
+                                             ("Port", self.email_port), ("Login", self.email_user),
+                                             ("Password", self.email_pass)]):
+            form.addWidget(QLabel(label), r, 0)
+            form.addWidget(widget, r, 1)
+        el.addLayout(form)
+        el.addWidget(self.email_ssl)
+        row = QHBoxLayout()
+        self.email_save_button = QPushButton("Save email settings")
+        self.email_test_button = QPushButton("Send test email")
+        self.email_test_button.setObjectName("secondaryButton")
+        self.email_save_button.clicked.connect(self.save_email_settings)
+        self.email_test_button.clicked.connect(self.send_test_email)
+        row.addWidget(self.email_save_button)
+        row.addWidget(self.email_test_button)
+        row.addStretch(1)
+        el.addLayout(row)
+        self.email_status_label = QLabel(self.email_notifier.status)
+        self.email_status_label.setObjectName("muted")
+        self.email_status_label.setWordWrap(True)
+        el.addWidget(self.email_status_label)
+        lay.addWidget(email_card)
+
+        prev_card, pl = card("Alert screen")
+        pn = QLabel("See what alert mode looks like. This sends nothing and detects nothing.")
+        pn.setObjectName("muted")
+        self.alert_preview_button = QPushButton("Preview alert screen")
+        self.alert_preview_button.setObjectName("secondaryButton")
+        self.alert_preview_button.clicked.connect(lambda: self.raise_alert(
+            AlertInfo("TEST", "high", "Test alert", "This is only a preview.", "test", "test"), force=True))
+        pl.addWidget(pn)
+        pl.addWidget(self.alert_preview_button, alignment=Qt.AlignLeft)
+        lay.addWidget(prev_card)
+
+        hist_card, hl = card("Alert history")
+        self.alert_history_list = QListWidget()
+        self.alert_history_list.setMinimumHeight(180)
+        self.alert_history_list.addItem("No alerts yet.")
+        hl.addWidget(self.alert_history_list)
+        lay.addWidget(hist_card)
+        lay.addStretch(1)
+        return page
+
+    def save_email_settings(self) -> bool:
+        to, host = self.email_to.text().strip(), self.email_host.text().strip()
+        try:
+            port = int(self.email_port.text().strip())
+        except ValueError:
+            port = 0
+        if not valid_email(to):
+            self.email_status_label.setText("Please enter a valid email address to send alerts to.")
+            return False
+        if not host or not 0 < port < 65536:
+            self.email_status_label.setText("Please enter the SMTP server and a valid port.")
+            return False
+        self.email_config = EmailConfig(to, host, port, self.email_user.text().strip(), self.email_ssl.isChecked())
+        try:
+            save_email_config(self.email_config)
+        except OSError as exc:
+            self.email_status_label.setText(f"Could not save settings: {exc}")
+            return False
+        if self.email_pass.text():
+            self.email_notifier.set_password(self.email_pass.text())
+        self.email_notifier.status = "Email alerts: set up"
+        self.email_status_label.setText(f"Saved. Alerts will be sent to {to}.")
+        return True
+
+    def send_test_email(self) -> None:
+        if not self.save_email_settings():
+            return
+        ok = self.email_notifier.notify(AlertInfo("TEST", "low", "Test email", "Your SecureWork AI email alerts work.",
+                                                  "test"), force=True)
+        self.email_status_label.setText("Sending test email..." if ok else "Email is not set up yet.")
+
+    # ------------------------------------------------------- app monitoring
+    def _toggle_app_monitor(self, on: bool) -> None:
+        self.workspace_panel.monitor_note.setText(
+            "On. You will get an alert if an app that is not allowed is running." if on
+            else "Off. When on, you get an alert if an app that is not allowed is running.")
+        if on:
+            self._app_monitor_timer.start(15000)
+            self._app_monitor_tick()
+        else:
+            self._app_monitor_timer.stop()
+        self._refresh_verification()
+
+    def _app_monitor_tick(self) -> None:
+        if self._app_monitor_busy or not self.workspace_panel.monitor_toggle.isChecked():
+            return
+        self._app_monitor_busy = True
+        worker = _ActionWorker(running_exe_names)
+        self._action_workers.add(worker)
+        worker.signals.finished.connect(lambda result, error, w=worker: self._app_monitor_done(w, result, error))
+        self._thread_pool.start(worker)
+
+    def _app_monitor_done(self, worker, result, error) -> None:
+        self._action_workers.discard(worker)
+        self._app_monitor_busy = False
+        if error is not None or not self.workspace_panel.monitor_toggle.isChecked():
+            return
+        panel = self.workspace_panel
+        for alert in check_running(panel.all_apps, panel.approved, result):
+            self.raise_alert(alert)
+
+    def _on_allowlist_changed(self) -> None:
+        self._refresh_verification()
+
+    # ---------------------------------------------------- full verification
+    def _verification_state(self) -> VerificationState:
+        usb = self._latest_usb_status
+        return VerificationState(
+            usb_adapter_approved=bool(usb is not None and usb.status == STATUS_APPROVED and usb.approved),
+            capture_active=self.network_monitor.is_active(),
+            rule_ids_active=self.rule_ids.active,
+            ml_active=self.ml_analyzer.active,
+            allowed_apps=len(self.workspace_panel.approved),
+            app_monitor_on=self.workspace_panel.monitor_toggle.isChecked(),
+            email_configured=self.email_notifier.configured,
+        )
+
+    def run_full_verification(self) -> None:
+        self._full_verification = True
+        self._refresh_system_status()
+        self._refresh_verification()
+
+    def _refresh_verification(self) -> None:
+        if not getattr(self, "_full_verification", False):
+            return
+        checks = run_checks(self._verification_state())
+        rows = [("✓  " if c.ok else "✗  ") + c.name + ("" if c.ok else f"  —  {c.fix}") for c in checks]
+        existing = [self.verify_list.item(i).text() for i in range(self.verify_list.count())]
+        if rows != existing:
+            self.verify_list.clear()
+            for c, text in zip(checks, rows):
+                item = QListWidgetItem(text)
+                item.setForeground(QColor(theme.c("ok" if c.ok else "bad")))
+                self.verify_list.addItem(item)
+        self._refresh_system_status()
 
     # ------------------------------------------------------------- ML control
     def start_ml_analysis(self) -> None:
@@ -615,8 +908,18 @@ class DashboardWindow(QMainWindow):
             status = "Partially verified"
             details = "The USB adapter is approved; overall system verification is not implemented."
 
+        color = "#9a6700"
+        if getattr(self, "_full_verification", False) and status == "Partially verified":
+            checks = run_checks(self._verification_state())
+            if is_fully_verified(checks):
+                status, color = "Fully verified", theme.c("ok")
+                details = (f"All {len(checks)} workspace checks pass right now. This describes the state of "
+                           "SecureWork AI's protections; it does not guarantee the device is secure.")
+            else:
+                missing = ", ".join(c.name for c in checks if not c.ok)
+                details = f"Not fully verified yet. Still needed: {missing}."
         self.system_status_label.setText(status)
-        self.system_status_label.setStyleSheet("color: #9a6700;")
+        self.system_status_label.setStyleSheet(f"color: {color};")
         self.system_status_details_label.setText(details)
 
     def refresh_network_interfaces(self) -> None:
@@ -769,7 +1072,12 @@ class DashboardWindow(QMainWindow):
         self._refresh_ids_snapshot()
         self._refresh_rule_ids(active)
         self._refresh_ml()
+        self._raise_new_alerts()
         self._refresh_overview()
+        self._refresh_verification()
+        if self.email_notifier.status != getattr(self, "_last_email_status", None):
+            self._last_email_status = self.email_notifier.status
+            self.email_status_label.setText(self.email_notifier.status)
 
     def _toggle_rule_ids_pause(self, paused: bool) -> None:
         self._rule_ids_paused = paused

@@ -1,4 +1,4 @@
-"""Separate Secure Workspace window.
+"""Apps tab: the Secure Workspace panel shown inside the main window.
 
 Each discovered application shows its icon, its name and an on/off switch. Click the name
 to see where the program is installed. Switching on allows it (saved to
@@ -10,9 +10,9 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import QFileInfo, QSize, Qt, QUrl
+from PySide6.QtCore import QFileInfo, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPixmap
-from PySide6.QtWidgets import (QFileIconProvider, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+from PySide6.QtWidgets import (QFileIconProvider, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from app.security.app_discovery import discover_installed_apps
@@ -20,7 +20,7 @@ from app.security.exe_icon import extract_icon_ico
 from app.security.workspace_apps import (DEFAULT_CONFIG, WorkspaceApp, launch, load_workspace_apps,
                                          save_workspace_apps)
 from app.ui import theme
-from app.ui.widgets import LogoMark, Toggle
+from app.ui.widgets import Toggle
 
 _TILE_COLORS = ["#2563eb", "#7c3aed", "#0d9488", "#d97706", "#db2777", "#0891b2", "#4f46e5", "#be123c"]
 _provider: QFileIconProvider | None = None
@@ -74,38 +74,48 @@ def app_icon_pixmap(app: WorkspaceApp, size: int = 40) -> QPixmap:
     return pm
 
 
-class WorkspaceWindow(QMainWindow):
+class WorkspacePanel(QWidget):
+    changed = Signal()  # emitted when the allowed-apps list changes
+
     def __init__(self, config_path=None, discovered: list[WorkspaceApp] | None = None) -> None:
         super().__init__()
         self.config_path = config_path or DEFAULT_CONFIG
-        self.setWindowTitle("SecureWork AI | Secure Workspace")
-        self.setMinimumSize(600, 540)
         self.approved: list[WorkspaceApp] = load_workspace_apps(self.config_path)
         self._injected = discovered
         self._expanded: set[str] = set()
         self.rows: dict[str, tuple[Toggle, QPushButton]] = {}
         self._all: list[WorkspaceApp] = []
 
-        central = QWidget()
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(24, 22, 24, 20)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 8, 0)
         outer.setSpacing(12)
-        head = QHBoxLayout()
-        head.addWidget(LogoMark(36))
-        titles = QVBoxLayout()
-        titles.setSpacing(0)
-        title = QLabel("Your work apps")
-        title.setObjectName("pageTitle")
         self.summary = QLabel()
         self.summary.setObjectName("muted")
-        titles.addWidget(title)
-        titles.addWidget(self.summary)
-        head.addLayout(titles, 1)
-        outer.addLayout(head)
-        hint = QLabel("Switch an app on to allow it for work. Click an app's name to see where it is installed.")
+        outer.addWidget(self.summary)
+        hint = QLabel("Verify your work apps: switch an app on to allow it for work. Click an app's name to see "
+                      "where it is installed.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         outer.addWidget(hint)
+
+        mon = QFrame()
+        mon.setObjectName("statusCard")
+        mlay = QHBoxLayout(mon)
+        mlay.setContentsMargins(14, 10, 14, 10)
+        mcol = QVBoxLayout()
+        mcol.setSpacing(0)
+        mtitle = QLabel("Monitor running apps")
+        mtitle.setObjectName("cardHeading")
+        self.monitor_note = QLabel("Off. When on, you get an alert if an app that is not allowed is running.")
+        self.monitor_note.setObjectName("muted")
+        self.monitor_note.setWordWrap(True)
+        mcol.addWidget(mtitle)
+        mcol.addWidget(self.monitor_note)
+        self.monitor_toggle = Toggle(False)
+        mlay.addLayout(mcol, 1)
+        mlay.addWidget(self.monitor_toggle)
+        outer.addWidget(mon)
+
         bar = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search apps")
@@ -125,8 +135,11 @@ class WorkspaceWindow(QMainWindow):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(holder)
         outer.addWidget(scroll, 1)
-        self.setCentralWidget(central)
         self.rescan()
+
+    @property
+    def all_apps(self) -> list[WorkspaceApp]:
+        return list(self._all)
 
     # ----- data -----
     def rescan(self) -> None:
@@ -149,6 +162,7 @@ class WorkspaceWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "Could not save", f"Your choice was not saved: {exc}")
         self._render()
+        self.changed.emit()
 
     def toggle_location(self, app: WorkspaceApp) -> None:
         key = app.command.lower()

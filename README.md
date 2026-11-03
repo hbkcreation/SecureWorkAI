@@ -164,8 +164,7 @@ unit-test suite (155 tests, one platform-dependent skip), and
 target environment; it does not establish cross-platform reproducibility or
 Npcap/live-capture compatibility.
 
-The dashboard may report `Partially verified` after approved USB-adapter checks,
-but overall system verification is not implemented. Live IDS inference remains
+The dashboard reports `Partially verified` after approved USB-adapter checks. System → *Run full verification* runs a 7-item checklist and reports `Fully verified` only while every item passes (see below); that describes the state of this workspace's protections, not a guarantee of device security. Live IDS inference remains
 **DISABLED**, selected-storage export remains **BLOCKED**, and pilot readiness
 remains **NOT READY**.
 
@@ -220,3 +219,13 @@ PostgreSQL DDL: `db/schema.sql`. Kibana: http://127.0.0.1:5601 → create a data
 - **New UI:** light (default) and dark themes with a switch in the top bar, remembered between runs (`app/ui/theme.py`); sidebar navigation (Overview, Network, Detection, System); KPI cards, protocol donut, live packets/sec chart, alert feed; app logo (`LogoMark`, also the window icon) and a user badge top-right; redesigned sign-in and workspace windows. Custom-painted widgets live in `app/ui/widgets.py` (no extra dependencies).
 - **Workspace apps:** each app shows its real icon, read directly from the program's `.exe` file (`app/security/exe_icon.py`, a read-only PE resource parser that runs nothing; Windows shell icon as fallback, letter tile only if the file has no icon), its name and an on/off switch; click the name to see where it is installed (with a *Show in folder* button). Only apps switched on can be opened.
 - Tested: 182 unit tests, plus offscreen Qt rendering on Linux. Not tested on Windows with Npcap capture or real approved apps.
+
+
+## Alert mode, email alerts, app monitoring and full verification
+
+- **Alert mode:** on an attack (rule-based IDS or ML) a red *ALERT MODE* banner appears on every screen with a **What to do** pop-up (high/critical severity), the window title shows a warning, and the alert is logged and listed in **Alerts → Alert history**. Duplicates are suppressed for 60 s. *Alerts → Preview alert screen* shows it without any detection.
+- **Email alerts** (`app/security/alert_email.py`): enter your email and SMTP details in **Alerts**. Each alert is emailed with a plain-language explanation and fix steps (`app/security/remediation.py`). Rate limited (one email per alert kind/source per 10 min, 30 s global) and sent on a background thread. Only non-secret settings are stored (`config/alert_email.json`, Git-ignored); the password is kept in memory for the session or read from `SECUREWORK_SMTP_PASSWORD`. For Gmail use an app password. Verified with a mocked SMTP sender; a real SMTP server was not contacted in testing.
+- **Phishing:** SecureWork AI reads network metadata and running programs, not message content, so it **cannot detect phishing**. Alert emails and pop-ups include phishing guidance (do not click, change the password, report it, enable MFA) as general advice only.
+- **Apps tab:** the old separate workspace window is now a tab in the main window. Allow/Block apps, see their location and real icons, and turn on **Monitor running apps** to get an alert when an installed app that is not allowed is running (checked every 15 s; system/background processes are ignored on purpose).
+- **Full verification** (`app/security/verification.py`, System tab): USB adapter approved, monitoring running, rule IDS active, ML running, at least one app allowed, app monitoring on, email set up. All must pass; it drops back to *Partially verified* if one stops passing.
+- Tested: 193 unit tests (mocked SMTP, offscreen Qt). Not tested on Windows, with a real mail server, or with real packet capture.

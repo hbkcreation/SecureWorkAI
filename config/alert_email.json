@@ -1,0 +1,7 @@
+{
+  "recipient": "kareem@example.com",
+  "smtp_host": "smtp.example.com",
+  "smtp_port": 587,
+  "username": "bot@example.com",
+  "use_ssl": false
+}

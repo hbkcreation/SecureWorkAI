@@ -8,19 +8,19 @@ from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from app.security.workspace_apps import WorkspaceApp, load_workspace_apps  # noqa: E402
 from app.ui import theme  # noqa: E402
-from app.ui.workspace_window import WorkspaceWindow  # noqa: E402
+from app.ui.workspace_window import WorkspacePanel  # noqa: E402
 
 APPS = [WorkspaceApp("Alpha", "/usr/bin/true"), WorkspaceApp("Beta", "/usr/bin/false")]
 
 
-class WorkspaceWindowTests(unittest.TestCase):
+class WorkspacePanelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.qapp = QApplication.instance() or QApplication([])
 
     def setUp(self):
         self.cfg = os.path.join(tempfile.mkdtemp(), "w.json")
-        self.win = WorkspaceWindow(self.cfg, discovered=APPS)
+        self.win = WorkspacePanel(self.cfg, discovered=APPS)
 
     def test_toggle_on_saves_and_enables_open(self):
         toggle, open_btn = self.win.rows["Alpha"]
