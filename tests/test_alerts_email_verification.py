@@ -79,14 +79,14 @@ class AppMonitorTests(unittest.TestCase):
 
 class VerificationTests(unittest.TestCase):
     def test_full_only_when_every_check_passes(self):
-        ok = VerificationState(True, True, True, True, 2, True, True)
+        ok = VerificationState(True, True, True, True, 2, True)
         self.assertTrue(is_fully_verified(run_checks(ok)))
         for field in ("usb_adapter_approved", "capture_active", "rule_ids_active", "ml_active",
-                      "app_monitor_on", "email_configured"):
+                      "app_monitor_on"):
             bad = VerificationState(**{**ok.__dict__, field: False})
             self.assertFalse(is_fully_verified(run_checks(bad)), field)
         self.assertFalse(is_fully_verified(run_checks(VerificationState(**{**ok.__dict__, "allowed_apps": 0}))))
-        self.assertEqual(len(run_checks(ok)), 7)
+        self.assertEqual(len(run_checks(ok)), 6)
 
 
 if __name__ == "__main__":

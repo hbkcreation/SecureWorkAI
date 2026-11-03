@@ -49,3 +49,6 @@ Thumbs.db
 !models/nslkdd_metrics.json
 logs/*.jsonl
 config/workspace_apps.json
+
+# Local alert-email settings (personal; never commit)
+config/alert_email.json

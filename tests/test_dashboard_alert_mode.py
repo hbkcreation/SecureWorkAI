@@ -83,3 +83,38 @@ class DashboardAlertModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmailSetupUxTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.qapp = QApplication.instance() or QApplication([])
+
+    def test_provider_presets_fill_server_and_summary_names_sender(self):
+        import tempfile
+        from pathlib import Path
+
+        import app.ui.dashboard_window as dw
+        d = DashboardWindow(lambda: None, username="t")
+        tmp = Path(tempfile.mkdtemp()) / "c.json"
+        orig = dw.save_email_config
+        dw.save_email_config = lambda cfg: orig(cfg, tmp)
+        try:
+            d.email_provider.setCurrentIndex(0)  # Gmail
+            self.assertEqual(d.email_host.text(), "smtp.gmail.com")
+            self.assertTrue(d.email_advanced.isHidden())
+            d.email_provider.setCurrentIndex(2)  # Yahoo -> SSL 465
+            self.assertEqual((d.email_port.text(), d.email_ssl.isChecked()), ("465", True))
+            d.email_provider.setCurrentIndex(0)
+            d.email_to.setText("me@gmail.com")
+            self.assertTrue(d.save_email_settings())
+            self.assertIn("sent from me@gmail.com to me@gmail.com", d.email_summary_label.text())
+            d.email_user.setText("bot@gmail.com")
+            d.save_email_settings()
+            self.assertIn("from bot@gmail.com to me@gmail.com", d.email_summary_label.text())
+            d.clear_email_settings()
+            self.assertIn("off", d.email_summary_label.text())
+            self.assertFalse(d.email_notifier.configured)
+        finally:
+            dw.save_email_config = orig
+            d.close()

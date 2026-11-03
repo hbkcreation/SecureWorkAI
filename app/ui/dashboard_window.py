@@ -599,9 +599,11 @@ class DashboardWindow(QMainWindow):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(16)
-        email_card, el = card("Email me when there is an attack")
-        note = QLabel("Alerts are emailed with plain steps to fix the problem. Your password is never saved to "
-                      "disk: type it here for this session, or set the SECUREWORK_SMTP_PASSWORD environment variable.")
+        email_card, el = card("Email alerts (optional)")
+        note = QLabel("Optional. When an attack is detected, SecureWork AI can email you what happened and how to fix it. "
+                      "It sends through YOUR OWN email account (the one you enter below), so you always know which "
+                      "address it comes from. Gmail and Yahoo need an app password, not your normal password. "
+                      "The password is never saved to disk.")
         note.setObjectName("muted")
         note.setWordWrap(True)
         el.addWidget(note)
@@ -609,38 +611,61 @@ class DashboardWindow(QMainWindow):
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
         cfg = self.email_config
+        self.email_provider = QComboBox()
+        for name in self.EMAIL_PROVIDERS:
+            self.email_provider.addItem(name)
         self.email_to = QLineEdit(cfg.recipient)
-        self.email_to.setPlaceholderText("you@example.com")
-        self.email_host = QLineEdit(cfg.smtp_host)
-        self.email_host.setPlaceholderText("smtp.gmail.com")
-        self.email_port = QLineEdit(str(cfg.smtp_port))
+        self.email_to.setPlaceholderText("where alerts should arrive, e.g. you@gmail.com")
         self.email_user = QLineEdit(cfg.username)
-        self.email_user.setPlaceholderText("sender login (usually your email)")
+        self.email_user.setPlaceholderText("the account that sends them (leave empty to use the address above)")
         self.email_pass = QLineEdit()
         self.email_pass.setEchoMode(QLineEdit.Password)
-        self.email_pass.setPlaceholderText("password or app password (kept in memory only)")
-        self.email_ssl = QCheckBox("Use SSL (port 465) instead of STARTTLS (port 587)")
-        self.email_ssl.setChecked(cfg.use_ssl)
-        for r, (label, widget) in enumerate([("Send alerts to", self.email_to), ("SMTP server", self.email_host),
-                                             ("Port", self.email_port), ("Login", self.email_user),
-                                             ("Password", self.email_pass)]):
+        self.email_pass.setPlaceholderText("app password (kept in memory only)")
+        for r, (label, widget) in enumerate([("Email provider", self.email_provider), ("Send alerts to", self.email_to),
+                                             ("Send from (login)", self.email_user), ("Password", self.email_pass)]):
             form.addWidget(QLabel(label), r, 0)
             form.addWidget(widget, r, 1)
         el.addLayout(form)
-        el.addWidget(self.email_ssl)
+        self.email_advanced = QWidget()
+        adv = QGridLayout(self.email_advanced)
+        adv.setContentsMargins(0, 0, 0, 0)
+        adv.setHorizontalSpacing(10)
+        adv.setVerticalSpacing(8)
+        self.email_host = QLineEdit(cfg.smtp_host)
+        self.email_host.setPlaceholderText("smtp.yourprovider.com")
+        self.email_port = QLineEdit(str(cfg.smtp_port))
+        self.email_ssl = QCheckBox("Use SSL (usually port 465) instead of STARTTLS (port 587)")
+        self.email_ssl.setChecked(cfg.use_ssl)
+        adv.addWidget(QLabel("SMTP server"), 0, 0)
+        adv.addWidget(self.email_host, 0, 1)
+        adv.addWidget(QLabel("Port"), 1, 0)
+        adv.addWidget(self.email_port, 1, 1)
+        adv.addWidget(self.email_ssl, 2, 1)
+        el.addWidget(self.email_advanced)
+        self.email_provider.currentIndexChanged.connect(self._apply_email_provider)
+        self.email_provider.setCurrentIndex(self._provider_index_for(cfg))
+        self._apply_email_provider()
         row = QHBoxLayout()
-        self.email_save_button = QPushButton("Save email settings")
+        self.email_save_button = QPushButton("Save")
         self.email_test_button = QPushButton("Send test email")
         self.email_test_button.setObjectName("secondaryButton")
+        self.email_clear_button = QPushButton("Turn email alerts off")
+        self.email_clear_button.setObjectName("secondaryButton")
         self.email_save_button.clicked.connect(self.save_email_settings)
         self.email_test_button.clicked.connect(self.send_test_email)
-        row.addWidget(self.email_save_button)
-        row.addWidget(self.email_test_button)
+        self.email_clear_button.clicked.connect(self.clear_email_settings)
+        for b in (self.email_save_button, self.email_test_button, self.email_clear_button):
+            row.addWidget(b)
         row.addStretch(1)
         el.addLayout(row)
+        self.email_summary_label = QLabel()
+        self.email_summary_label.setStyleSheet("font-weight: 600;")
+        self.email_summary_label.setWordWrap(True)
+        self._update_email_summary()
         self.email_status_label = QLabel(self.email_notifier.status)
         self.email_status_label.setObjectName("muted")
         self.email_status_label.setWordWrap(True)
+        el.addWidget(self.email_summary_label)
         el.addWidget(self.email_status_label)
         lay.addWidget(email_card)
 
@@ -664,6 +689,49 @@ class DashboardWindow(QMainWindow):
         lay.addStretch(1)
         return page
 
+    EMAIL_PROVIDERS = {
+        "Gmail": ("smtp.gmail.com", 587, False),
+        "Outlook / Hotmail": ("smtp-mail.outlook.com", 587, False),
+        "Yahoo": ("smtp.mail.yahoo.com", 465, True),
+        "Other (enter server details)": ("", 587, False),
+    }
+
+    def _provider_index_for(self, cfg: EmailConfig) -> int:
+        for i, (host, _port, _ssl) in enumerate(self.EMAIL_PROVIDERS.values()):
+            if host and cfg.smtp_host.lower() == host:
+                return i
+        return len(self.EMAIL_PROVIDERS) - 1
+
+    def _apply_email_provider(self) -> None:
+        host, port, ssl_on = list(self.EMAIL_PROVIDERS.values())[self.email_provider.currentIndex()]
+        other = not host
+        self.email_advanced.setVisible(other)
+        if not other:
+            self.email_host.setText(host)
+            self.email_port.setText(str(port))
+            self.email_ssl.setChecked(ssl_on)
+
+    def _update_email_summary(self) -> None:
+        cfg = self.email_config
+        if self.email_notifier.configured:
+            sender = cfg.username if valid_email(cfg.username) else cfg.recipient
+            self.email_summary_label.setText(f"Alerts will be sent from {sender} to {cfg.recipient}.")
+        else:
+            self.email_summary_label.setText("Email alerts are off. Alerts still appear on screen.")
+
+    def clear_email_settings(self) -> None:
+        self.email_config = EmailConfig()
+        try:
+            save_email_config(self.email_config)
+        except OSError:
+            pass
+        for w in (self.email_to, self.email_user, self.email_pass):
+            w.clear()
+        self.email_notifier.set_password("")
+        self.email_notifier.status = "Email alerts: off"
+        self.email_status_label.setText("Email alerts are off.")
+        self._update_email_summary()
+
     def save_email_settings(self) -> bool:
         to, host = self.email_to.text().strip(), self.email_host.text().strip()
         try:
@@ -685,7 +753,8 @@ class DashboardWindow(QMainWindow):
         if self.email_pass.text():
             self.email_notifier.set_password(self.email_pass.text())
         self.email_notifier.status = "Email alerts: set up"
-        self.email_status_label.setText(f"Saved. Alerts will be sent to {to}.")
+        self.email_status_label.setText("Saved.")
+        self._update_email_summary()
         return True
 
     def send_test_email(self) -> None:
@@ -738,7 +807,6 @@ class DashboardWindow(QMainWindow):
             ml_active=self.ml_analyzer.active,
             allowed_apps=len(self.workspace_panel.approved),
             app_monitor_on=self.workspace_panel.monitor_toggle.isChecked(),
-            email_configured=self.email_notifier.configured,
         )
 
     def run_full_verification(self) -> None:

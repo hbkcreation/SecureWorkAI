@@ -16,7 +16,6 @@ class VerificationState:
     ml_active: bool
     allowed_apps: int
     app_monitor_on: bool
-    email_configured: bool
 
 
 @dataclass(frozen=True)
@@ -35,7 +34,6 @@ def run_checks(s: VerificationState) -> list[Check]:
         Check("ML analysis running", s.ml_active, "Go to Detection and press Start ML analysis."),
         Check("At least one work app allowed", s.allowed_apps > 0, "Go to Apps and switch on your approved apps."),
         Check("Running-app monitoring on", s.app_monitor_on, "Go to Apps and turn on Monitor running apps."),
-        Check("Alert email set up", s.email_configured, "Go to Alerts and save your email settings."),
     ]
 
 
