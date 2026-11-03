@@ -118,3 +118,44 @@ class EmailSetupUxTests(unittest.TestCase):
         finally:
             dw.save_email_config = orig
             d.close()
+
+
+class PopupStormTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.qapp = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.d = DashboardWindow(lambda: None, username="t")
+
+    def tearDown(self):
+        for dlg in self.d._alert_dialogs:
+            dlg.close()
+        self.d.close()
+
+    def visible_dialogs(self):
+        return [x for x in self.d._alert_dialogs if x.isVisible()]
+
+    def test_flood_of_serious_alerts_opens_only_one_window(self):
+        for i in range(60):  # different sources each time: defeats per-source de-duplication
+            self.d.raise_alert(AlertInfo("PORT_SCAN", "high", "Port scan detected", "d", f"10.0.0.{i}", "10.0.0.1"))
+        self.assertEqual(len(self.visible_dialogs()), 1)
+        self.assertIn("more alert", self.visible_dialogs()[0].more_label.text())
+        self.assertFalse(self.d.alert_banner.isHidden())  # banner still shows the latest
+
+    def test_ml_alerts_never_open_windows_and_repeat_rarely(self):
+        for i in range(30):
+            self.d.raise_alert(AlertInfo("DOS_FLOOD", "high", "Traffic flood flagged by ML", "d", "multiple sources",
+                                         "239.1.1.1:1900", origin="ml"))
+        self.assertEqual(self.visible_dialogs(), [])
+        self.assertEqual(len(self.d.alert_history), 1)  # 5-minute cooldown collapses repeats
+
+    def test_popups_can_be_switched_off_but_banner_stays(self):
+        self.d.popups_enabled.setChecked(False)
+        self.d.raise_alert(AlertInfo("SYN_FLOOD", "critical", "SYN flood", "d", "1.2.3.4", "10.0.0.1"))
+        self.assertEqual(self.visible_dialogs(), [])
+        self.assertFalse(self.d.alert_banner.isHidden())
+
+    def test_test_alert_still_opens_a_window(self):
+        self.d.raise_alert(AlertInfo("TEST", "high", "Test alert", "preview", "test", "test"), force=True)
+        self.assertEqual(len(self.visible_dialogs()), 1)

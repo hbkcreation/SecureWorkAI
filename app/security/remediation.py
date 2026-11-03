@@ -20,6 +20,7 @@ class AlertInfo:
     source: str = ""
     target: str = ""
     timestamp: float = field(default_factory=time.time)
+    origin: str = "rule"  # "rule" (rule-based IDS / app monitor) or "ml" (experimental model)
 
 
 @dataclass(frozen=True)

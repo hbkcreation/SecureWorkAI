@@ -115,3 +115,49 @@ class MlBatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoiseFilterTests(unittest.TestCase):
+    def test_multicast_and_broadcast_are_noise(self):
+        from app.security.traffic_filters import is_noise_destination as n
+        for ip in ("239.255.255.250", "224.0.0.251", "255.255.255.255", "ff02::fb"):
+            self.assertTrue(n(ip), ip)
+        for ip in ("10.0.0.1", "8.8.8.8", "", None, "not-an-ip"):
+            self.assertFalse(n(ip), ip)
+
+    def test_ml_skips_multicast_flows_and_ignores_weak_guesses(self):
+        import tempfile
+        from pathlib import Path
+        from tests.test_live_synthetic_ml import flow
+        d = Path(tempfile.mkdtemp())
+        ls.train(d / "m.joblib", d / "r.json")
+        a = ls.LiveMLAnalyzer(d / "m.joblib")
+        a.load_or_train()
+        a.start()
+        f = flow(8000, 0, 640000, 0, 3, "udp", 1900)  # flood-shaped, but to multicast
+        object.__setattr__(f, "destination_ip", "239.255.255.250")
+        a.inspect_completed_flow(f)
+        self.assertEqual((a.flows_scored, a.skipped_noise, a.attack_flows), (0, 1, 0))
+        a.inspect_completed_flow(flow(8000, 0, 640000, 0, 3, "udp", 53))  # same shape, unicast
+        self.assertEqual(a.attack_flows, 1)
+        # a guess below the confidence floor counts as normal
+        a2 = ls.LiveMLAnalyzer(d / "m.joblib")
+        a2.load_or_train()
+        a2.start()
+        orig = ls.MIN_ATTACK_CONFIDENCE
+        ls.MIN_ATTACK_CONFIDENCE = 1.01
+        try:
+            a2.inspect_completed_flow(flow(8000, 0, 640000, 0, 3, "udp", 53))
+        finally:
+            ls.MIN_ATTACK_CONFIDENCE = orig
+        self.assertEqual((a2.flows_scored, a2.attack_flows), (1, 0))
+
+    def test_rule_ids_ignores_multicast_rate(self):
+        ids = RuleBasedIDS(rate_threshold=50, scan_ports=10**6, syn_threshold=10**6)
+        ids.start()
+        for i in range(500):
+            ids.process_packet(pkt(i * 0.001, dst="239.255.255.250", dport=1900, proto="UDP"))
+        self.assertEqual(ids.alert_count, 0)
+        for i in range(500):
+            ids.process_packet(pkt(i * 0.001, dst="10.0.0.1", dport=80))
+        self.assertEqual(ids.alert_count, 1)

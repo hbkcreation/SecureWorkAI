@@ -48,6 +48,11 @@ class AlertDialog(QDialog):
             note.setObjectName("muted")
             note.setWordWrap(True)
             lay.addWidget(note)
+        self.more_label = QLabel("")
+        self.more_label.setObjectName("muted")
+        self.more_label.hide()
+        lay.addWidget(self.more_label)
+        self._more = 0
         row = QHBoxLayout()
         row.addStretch(1)
         ok = QPushButton("I understand")
@@ -55,3 +60,10 @@ class AlertDialog(QDialog):
         row.addWidget(ok)
         lay.addLayout(row)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
+
+    def add_more(self) -> None:
+        """Another alert arrived while this window is open: count it instead of opening a second window."""
+        self._more += 1
+        self.more_label.setText(f"{self._more} more alert{'s' if self._more != 1 else ''} since this window opened. "
+                                "See the Alerts tab for the full list.")
+        self.more_label.show()

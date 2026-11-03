@@ -26,12 +26,16 @@ from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.model_selection import train_test_split
 
 from app.security.flow_aggregator import CompletedFlow
+from app.security.traffic_filters import is_noise_destination
 
 FEATURES = ["dur", "spkts", "dpkts", "sbytes", "dbytes", "rate", "smean", "dmean",
             "is_tcp", "is_udp", "byte_ratio", "pkt_ratio"]
 CLASSES = ["normal", "port_scan", "dos_flood", "data_exfiltration"]
 MODEL_PATH = Path("models/live_synthetic_rf.joblib")
 REPORT_PATH = Path("models/live_synthetic_report.json")
+# An attack label below this confidence is treated as normal: the model is synthetic-trained and
+# real traffic is often out of its depth, so weak guesses must not raise alerts.
+MIN_ATTACK_CONFIDENCE = 0.80
 SEVERITY = {"normal": "NORMAL", "port_scan": "SUSPICIOUS", "dos_flood": "SUSPICIOUS",
             "data_exfiltration": "SUSPICIOUS"}
 
@@ -151,6 +155,7 @@ class LiveMLAnalyzer:
         self.batch = batch
         self._pending: deque[CompletedFlow] = deque(maxlen=max_pending)
         self.dropped_flows = 0
+        self.skipped_noise = 0
 
     @property
     def loaded(self) -> bool:
@@ -195,6 +200,10 @@ class LiveMLAnalyzer:
     def inspect_completed_flow(self, flow: CompletedFlow) -> None:
         if not self.active or not self.loaded:
             return
+        if is_noise_destination(flow.destination_ip):  # multicast / broadcast discovery chatter
+            with self._lock:
+                self.skipped_noise += 1
+            return
         if self.batch:  # queue now, score many flows at once in flush() (much cheaper than one by one)
             with self._lock:
                 if len(self._pending) == self._pending.maxlen:
@@ -219,6 +228,8 @@ class LiveMLAnalyzer:
             idx = proba.argmax(axis=1)
             labels = [str(self._model.classes_[i]) for i in idx]
             confs = proba[np.arange(len(flows)), idx]
+            labels = [lab if (lab == "normal" or c >= MIN_ATTACK_CONFIDENCE) else "normal"
+                      for lab, c in zip(labels, confs)]
         except Exception as exc:  # never break capture because of the analyzer
             self.error = str(exc)
             return
