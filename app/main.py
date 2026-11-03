@@ -6,7 +6,8 @@ from app.security.network_monitor import NetworkMonitor
 from app.security.usb_checker import USBAdapterChecker
 from app.ui.dashboard_window import DashboardWindow
 from app.ui.login_window import LoginWindow
-from app.ui.theme import STYLESHEET
+from app.ui import theme
+from app.ui.widgets import app_icon
 from app.ui.workspace_window import WorkspaceWindow
 from app.utils.logging_config import configure_logging
 
@@ -56,7 +57,8 @@ def main() -> int:
     logger = logging.getLogger(__name__)
     app = QApplication(sys.argv)
     app.setApplicationName("SecureWork AI")
-    app.setStyleSheet(STYLESHEET)
+    app.setWindowIcon(app_icon())
+    theme.apply(theme.saved_mode(), save=False)
     application = SecureWorkApplication(app)
     app.aboutToQuit.connect(application.shutdown)
     application.login_window.show()

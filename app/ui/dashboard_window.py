@@ -17,7 +17,7 @@ from app.security.rule_ids import ProtocolCounter, RuleBasedIDS
 from app.ml.live_synthetic import LiveMLAnalyzer
 from app.ui import theme
 from app.ui.protocol_chart import ProtocolPieChart
-from app.ui.widgets import Avatar, KpiCard, Sparkline, card, make_chip, set_chip
+from app.ui.widgets import Avatar, KpiCard, LogoMark, Sparkline, Toggle, card, make_chip, set_chip
 from app.security.usb_checker import USBAdapterChecker, USBAdapterStatus, STATUS_APPROVED
 
 logger = logging.getLogger(__name__)
@@ -118,6 +118,7 @@ class DashboardWindow(QMainWindow):
         self.setWindowTitle("SecureWork AI | Dashboard")
         self.setMinimumSize(1100, 720)
         self._build_ui(username)
+        theme.signals.changed.connect(self._on_theme_changed)
 
         self._network_timer = QTimer(self)
         self._network_timer.timeout.connect(self._refresh_network_snapshot)
@@ -142,18 +143,23 @@ class DashboardWindow(QMainWindow):
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(16, 22, 16, 18)
         sb.setSpacing(6)
-        brand = QLabel("◈  SecureWork AI")
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        brand_row.addWidget(LogoMark(34))
+        brand_col = QVBoxLayout()
+        brand_col.setSpacing(0)
+        brand = QLabel("SecureWork AI")
         brand.setObjectName("brand")
-        tag = QLabel("BYOD security workspace")
+        tag = QLabel("Protected workspace")
         tag.setObjectName("muted")
-        sb.addWidget(brand)
-        sb.addWidget(tag)
+        brand_col.addWidget(brand)
+        brand_col.addWidget(tag)
+        brand_row.addLayout(brand_col, 1)
+        sb.addLayout(brand_row)
         sb.addSpacing(22)
         self._nav_buttons: list[QPushButton] = []
-        for index, (icon, label) in enumerate(
-            [("▦", "Overview"), ("◉", "Network"), ("⛨", "Detection"), ("⚙", "System")]
-        ):
-            btn = QPushButton(f"{icon}   {label}")
+        for index, label in enumerate(["Overview", "Network", "Detection", "System"]):
+            btn = QPushButton(label)
             btn.setObjectName("navButton")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -161,7 +167,7 @@ class DashboardWindow(QMainWindow):
             sb.addWidget(btn)
             self._nav_buttons.append(btn)
         sb.addStretch(1)
-        footer = QLabel("Signals are indicators, not proof of compromise.")
+        footer = QLabel("Alerts are signals to look into, not proof that something is wrong.")
         footer.setObjectName("muted")
         footer.setWordWrap(True)
         sb.addWidget(footer)
@@ -186,12 +192,20 @@ class DashboardWindow(QMainWindow):
         self.chip_ml = make_chip("ML: off")
         for chip in (self.chip_capture, self.chip_rules, self.chip_ml):
             top.addWidget(chip)
+        top.addSpacing(8)
+        self.theme_toggle = Toggle(theme.mode() == "dark")
+        self.theme_toggle.setToolTip("Switch between light and dark mode")
+        self.theme_toggle.toggled.connect(lambda on: theme.apply("dark" if on else "light"))
+        mode_label = QLabel("Dark mode")
+        mode_label.setObjectName("muted")
+        top.addWidget(mode_label)
+        top.addWidget(self.theme_toggle)
         top.addSpacing(10)
         who = QVBoxLayout()
         who.setSpacing(0)
         name_label = QLabel(username or "Signed in")
-        name_label.setStyleSheet("font-weight:700;")
-        role_label = QLabel("Secure session")
+        name_label.setStyleSheet("font-weight:600;")
+        role_label = QLabel("Signed in")
         role_label.setObjectName("muted")
         who.addWidget(name_label, alignment=Qt.AlignRight)
         who.addWidget(role_label, alignment=Qt.AlignRight)
@@ -217,6 +231,10 @@ class DashboardWindow(QMainWindow):
         area.setWidget(content)
         return area
 
+    def _on_theme_changed(self, _mode: str) -> None:
+        self.signal_feed.clear()  # re-colour the feed for the new theme on the next refresh
+        self._refresh_overview()
+
     def _show_page(self, index: int) -> None:
         names = ["Overview", "Network", "Detection", "System"]
         self.pages.setCurrentIndex(index)
@@ -240,10 +258,10 @@ class DashboardWindow(QMainWindow):
         lay.setSpacing(16)
         row = QHBoxLayout()
         row.setSpacing(14)
-        self.kpi_packets = KpiCard("Packets captured", theme.CYAN)
-        self.kpi_flows = KpiCard("Flows completed", theme.VIOLET)
-        self.kpi_rules = KpiCard("Rule alerts", theme.WARN)
-        self.kpi_ml = KpiCard("ML flagged flows", theme.BAD)
+        self.kpi_packets = KpiCard("Packets captured", "accent")
+        self.kpi_flows = KpiCard("Flows completed", "ok")
+        self.kpi_rules = KpiCard("Rule alerts", "warn")
+        self.kpi_ml = KpiCard("ML flagged flows", "bad")
         for k in (self.kpi_packets, self.kpi_flows, self.kpi_rules, self.kpi_ml):
             row.addWidget(k)
         lay.addLayout(row)
@@ -260,10 +278,10 @@ class DashboardWindow(QMainWindow):
         mid.addWidget(c2, 1)
         lay.addLayout(mid)
 
-        c3, l3 = card("Latest security signals")
+        c3, l3 = card("Latest alerts")
         self.signal_feed = QListWidget()
         self.signal_feed.setMinimumHeight(190)
-        self.signal_feed.addItem("No signals yet. Start monitoring to see live detections.")
+        self.signal_feed.addItem("Nothing to report yet. Start monitoring and alerts will show up here.")
         l3.addWidget(self.signal_feed)
         lay.addWidget(c3)
         lay.addStretch(1)
@@ -329,13 +347,13 @@ class DashboardWindow(QMainWindow):
         lay.addWidget(rule_card)
 
         # ML (Random Forest, synthetic-trained)
-        ml_card, ml = card("ML analysis · Random Forest (synthetic-trained)")
+        ml_card, ml = card("ML analysis (Random Forest)")
         self.ml_status_label = QLabel("ML analysis: OFF")
         self.ml_status_label.setObjectName("statusValue")
         self.ml_counts_label = QLabel("Flows scored: 0 | flagged: 0")
         caveat = QLabel(
-            "Trained on synthetic traffic profiles, not real attacks: treat results as an experimental "
-            "signal. It scores completed live flows (needs capture running)."
+            "This model was trained on made-up (synthetic) traffic, not real attacks, so treat its results as a "
+            "hint rather than a verdict. It checks finished connections, so monitoring needs to be running."
         )
         caveat.setObjectName("muted")
         caveat.setWordWrap(True)
@@ -480,7 +498,7 @@ class DashboardWindow(QMainWindow):
         elif not hasattr(self, "_rate_last"):
             self._rate_last = (now, packets)
         rule_alerts = self.rule_ids.alerts
-        self.kpi_packets.set(packets, "since monitoring started")
+        self.kpi_packets.set(packets, "since you started monitoring")
         self.kpi_flows.set(flows, f"{self.ids_service.flows_checked} checked by UNSW gate")
         self.kpi_rules.set(len(rule_alerts), "port scan · SYN flood · rate")
         self.kpi_ml.set(self.ml_analyzer.attack_flows, f"of {self.ml_analyzer.flows_scored} scored")
@@ -489,15 +507,15 @@ class DashboardWindow(QMainWindow):
                     for e in self.ml_analyzer.events if e.label != "normal"]
         signals.sort(key=lambda s: s[0])
         rendered = [f"{sev:<9} {text}" for _t, sev, text in signals[-8:]][::-1] or [
-            "No signals yet. Start monitoring to see live detections."]
+            "Nothing to report yet. Start monitoring and alerts will show up here."]
         existing = [self.signal_feed.item(i).text() for i in range(self.signal_feed.count())]
         if rendered != existing:
             self.signal_feed.clear()
             for line in rendered:
                 item = QListWidgetItem(line)
-                color = {"CRITICAL": theme.BAD, "HIGH": theme.BAD, "MEDIUM": theme.WARN, "ML": theme.VIOLET}.get(
-                    line.split()[0] if line.split() else "", theme.MUTED)
-                item.setForeground(QColor(color))
+                role = {"CRITICAL": "bad", "HIGH": "bad", "MEDIUM": "warn", "ML": "accent"}.get(
+                    line.split()[0] if line.split() else "", "muted")
+                item.setForeground(QColor(theme.c(role)))
                 self.signal_feed.addItem(item)
         set_chip(self.chip_capture, "Capture: running" if self.network_monitor.is_active() else "Capture: stopped",
                  "ok" if self.network_monitor.is_active() else "")

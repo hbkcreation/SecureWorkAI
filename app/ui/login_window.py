@@ -5,6 +5,8 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
     QVBoxLayout, QWidget,
 )
+from app.ui import theme
+from app.ui.widgets import LogoMark
 from app.security.auth import AccountStoreStatus, account_store_status, authenticate
 
 logger = logging.getLogger(__name__)
@@ -23,36 +25,31 @@ class LoginWindow(QMainWindow):
         row.setSpacing(0)
 
         # Brand panel
-        hero = QFrame()
-        hero.setStyleSheet(
-            "QFrame { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #14246b, stop:0.55 #3b1d8f,"
-            " stop:1 #0a0e1a); border: 0; } QLabel { background: transparent; }"
-        )
-        hl = QVBoxLayout(hero)
-        hl.setContentsMargins(48, 56, 48, 48)
-        logo = QLabel("◈")
-        logo.setStyleSheet("font-size: 54px; color: #38bdf8;")
-        headline = QLabel("SecureWork AI")
-        headline.setStyleSheet("font-size: 38px; font-weight: 800; color: white;")
-        sub = QLabel("A protected workspace for the personal device you use for work.")
-        sub.setWordWrap(True)
-        sub.setStyleSheet("font-size: 15px; color: #c7d2fe;")
-        hl.addWidget(logo)
-        hl.addWidget(headline)
-        hl.addWidget(sub)
-        hl.addSpacing(26)
-        for text in ("●  Live network monitoring and flow analysis",
-                     "●  Rule-based and Random Forest intrusion signals",
-                     "●  Approved-application workspace",
-                     "●  USB Wi-Fi adapter verification"):
-            item = QLabel(text)
-            item.setStyleSheet("font-size: 14px; color: #e0e7ff; padding: 4px 0;")
+        self._hero = QFrame()
+        hl = QVBoxLayout(self._hero)
+        hl.setContentsMargins(48, 52, 48, 44)
+        hl.addWidget(LogoMark(52, inverted=True), alignment=Qt.AlignLeft)
+        hl.addSpacing(14)
+        self._hero_title = QLabel("SecureWork AI")
+        self._hero_sub = QLabel("A safer way to use your own laptop for work.")
+        self._hero_sub.setWordWrap(True)
+        hl.addWidget(self._hero_title)
+        hl.addWidget(self._hero_sub)
+        hl.addSpacing(22)
+        self._hero_items = []
+        for text in ("Keeps an eye on your network traffic",
+                     "Flags port scans, floods and other odd behaviour",
+                     "Lets you open only the apps your company approves",
+                     "Checks that your approved USB Wi-Fi adapter is in use"):
+            item = QLabel("•  " + text)
+            self._hero_items.append(item)
             hl.addWidget(item)
         hl.addStretch(1)
-        foot = QLabel("Prototype · alerts are signals, not proof of compromise")
-        foot.setStyleSheet("font-size: 12px; color: #a5b4fc;")
-        hl.addWidget(foot)
-        row.addWidget(hero, 5)
+        self._hero_foot = QLabel("Prototype. Alerts are signals, not proof of a problem.")
+        hl.addWidget(self._hero_foot)
+        self._style_hero()
+        theme.signals.changed.connect(lambda _m: self._style_hero())
+        row.addWidget(self._hero, 5)
 
         # Form panel
         right = QWidget()
@@ -60,19 +57,19 @@ class LoginWindow(QMainWindow):
         outer.setContentsMargins(56, 36, 56, 36)
         outer.setSpacing(14)
         outer.addStretch(1)
-        title = QLabel("Welcome back")
+        title = QLabel("Sign in")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("Sign in to enter your secure workspace")
+        subtitle = QLabel("Use the account your administrator set up for you.")
         subtitle.setObjectName("muted")
         outer.addWidget(title)
         outer.addWidget(subtitle)
         outer.addSpacing(10)
-        ulabel = QLabel("USERNAME")
+        ulabel = QLabel("Username")
         ulabel.setObjectName("cardHeading")
         self.username = QLineEdit()
         self.username.setPlaceholderText("Enter your username")
         self.username.setText("")
-        plabel = QLabel("PASSWORD")
+        plabel = QLabel("Password")
         plabel.setObjectName("cardHeading")
         self.password = QLineEdit()
         self.password.setPlaceholderText("Enter your password")
@@ -93,6 +90,14 @@ class LoginWindow(QMainWindow):
         row.addWidget(right, 4)
         self.setCentralWidget(central)
         self._show_account_store_status()
+
+    def _style_hero(self) -> None:
+        self._hero.setStyleSheet(f"QFrame {{ background: {theme.c('hero')}; border: 0; }} QLabel {{ background: transparent; }}")
+        self._hero_title.setStyleSheet(f"font-size: 32px; font-weight: 700; color: {theme.c('hero_text')};")
+        self._hero_sub.setStyleSheet(f"font-size: 15px; color: {theme.c('hero_sub')};")
+        for item in self._hero_items:
+            item.setStyleSheet(f"font-size: 14px; color: {theme.c('hero_text')}; padding: 3px 0;")
+        self._hero_foot.setStyleSheet(f"font-size: 12px; color: {theme.c('hero_sub')};")
 
     def _show_account_store_status(self) -> None:
         status = account_store_status()

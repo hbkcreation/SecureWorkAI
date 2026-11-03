@@ -1,71 +1,126 @@
-"""Application-wide dark 'security operations' theme."""
+"""Light and dark themes. Light is the default; the choice is remembered between runs."""
+from __future__ import annotations
 
-BG = "#0a0e1a"
-SURFACE = "#111831"
-SURFACE2 = "#0d1326"
-BORDER = "#1e2a52"
-TEXT = "#e8ecff"
-MUTED = "#8a95c0"
-CYAN = "#38bdf8"
-VIOLET = "#8b5cf6"
-OK = "#22c55e"
-WARN = "#f59e0b"
-BAD = "#ef4444"
+from PySide6.QtCore import QObject, QSettings, Signal
+from PySide6.QtWidgets import QApplication
 
-STYLESHEET = f"""
-* {{ font-family: 'Segoe UI', 'Inter', 'Helvetica Neue', sans-serif; font-size: 13px; }}
-QWidget {{ background: {BG}; color: {TEXT}; }}
-QMainWindow, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {BG}; border: 0; }}
+LIGHT = {
+    "bg": "#f5f6f8", "surface": "#ffffff", "surface2": "#f0f2f5", "border": "#dfe3e8",
+    "text": "#1f2937", "muted": "#6b7280", "accent": "#2563eb", "accent_hover": "#1d4ed8",
+    "accent_text": "#ffffff", "accent_soft": "#e8f0fe", "ok": "#15803d", "ok_bg": "#e7f6ec",
+    "warn": "#b45309", "warn_bg": "#fdf3e0", "bad": "#b91c1c", "bad_bg": "#fdeaea",
+    "track": "#e9ecf1", "hero": "#2563eb", "hero_text": "#ffffff", "hero_sub": "#dbe7ff",
+    "chart": ["#2563eb", "#7c3aed", "#0d9488", "#d97706", "#db2777", "#0891b2", "#6b7280"],
+}
+DARK = {
+    "bg": "#15171c", "surface": "#1e2128", "surface2": "#191c22", "border": "#2d323c",
+    "text": "#e5e7eb", "muted": "#9aa1ad", "accent": "#5b8def", "accent_hover": "#7aa3f5",
+    "accent_text": "#0b1220", "accent_soft": "#26334f", "ok": "#4ade80", "ok_bg": "#17301f",
+    "warn": "#fbbf24", "warn_bg": "#33280f", "bad": "#f87171", "bad_bg": "#3a1a1d",
+    "track": "#2a2f3a", "hero": "#1e3a8a", "hero_text": "#ffffff", "hero_sub": "#bcd0ff",
+    "chart": ["#5b8def", "#a78bfa", "#2dd4bf", "#fbbf24", "#f472b6", "#22d3ee", "#9aa1ad"],
+}
+
+
+class _Signals(QObject):
+    changed = Signal(str)
+
+
+signals = _Signals()
+_mode = "light"
+
+
+def mode() -> str:
+    return _mode
+
+
+def c(name: str):
+    return (DARK if _mode == "dark" else LIGHT)[name]
+
+
+def build_stylesheet() -> str:
+    g = c
+    return f"""
+* {{ font-family: 'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif; font-size: 13px; }}
+QWidget {{ background: {g('bg')}; color: {g('text')}; }}
+QMainWindow, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {g('bg')}; border: 0; }}
 QLabel {{ background: transparent; }}
-QLabel#pageTitle {{ font-size: 24px; font-weight: 700; color: {TEXT}; }}
-QLabel#muted {{ color: {MUTED}; }}
-QLabel#cardHeading {{ font-size: 13px; font-weight: 700; color: {MUTED}; letter-spacing: 1px; text-transform: uppercase; }}
-QLabel#statusValue {{ font-size: 15px; font-weight: 600; color: {CYAN}; }}
-QLabel#message {{ color: {BAD}; min-height: 18px; }}
-QLabel#brand {{ font-size: 19px; font-weight: 800; color: {TEXT}; }}
-QLabel#kpiValue {{ font-size: 30px; font-weight: 800; color: {TEXT}; }}
-QLabel#kpiTitle {{ color: {MUTED}; font-size: 12px; font-weight: 600; }}
-QLabel#bigNote {{ color: {MUTED}; font-size: 12px; }}
-QFrame#sidebar {{ background: {SURFACE2}; border-right: 1px solid {BORDER}; }}
+QLabel#pageTitle {{ font-size: 22px; font-weight: 600; }}
+QLabel#muted {{ color: {g('muted')}; }}
+QLabel#cardHeading {{ font-size: 14px; font-weight: 600; color: {g('text')}; }}
+QLabel#statusValue {{ font-size: 14px; font-weight: 600; color: {g('accent')}; }}
+QLabel#message {{ color: {g('bad')}; min-height: 18px; }}
+QLabel#brand {{ font-size: 16px; font-weight: 700; }}
+QLabel#kpiValue {{ font-size: 28px; font-weight: 600; }}
+QLabel#kpiTitle {{ color: {g('muted')}; font-size: 12px; }}
+QLabel#bigNote {{ color: {g('muted')}; font-size: 12px; }}
+QFrame#sidebar {{ background: {g('surface')}; border-right: 1px solid {g('border')}; }}
 QFrame#sidebar QWidget {{ background: transparent; }}
 QFrame#panel, QFrame#statusCard, QFrame#kpiCard, QFrame#appRow {{
-    background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 14px; }}
-QFrame#kpiCard {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #131c3d, stop:1 #0f1630); }}
-QFrame#securityBox {{ background: #101a3a; border: 1px solid {BORDER}; border-radius: 12px; }}
-QFrame#cardInner, QFrame#cardInner QLabel {{ background: transparent; border: 0; }}
-QPushButton {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {CYAN}, stop:1 {VIOLET});
-    color: #06101f; border: 0; border-radius: 9px; padding: 9px 16px; font-weight: 700; }}
-QPushButton:hover {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7dd3fc, stop:1 #a78bfa); }}
-QPushButton:pressed {{ background: {VIOLET}; }}
-QPushButton:disabled {{ background: #1a2342; color: #5a6690; }}
-QPushButton#secondaryButton {{ background: #1a2547; color: {TEXT}; border: 1px solid {BORDER}; }}
-QPushButton#secondaryButton:hover {{ background: #223062; }}
-QPushButton#secondaryButton:checked {{ background: #3b2a6b; border-color: {VIOLET}; }}
-QPushButton#navButton {{ background: transparent; color: {MUTED}; text-align: left; padding: 11px 14px;
-    border-radius: 10px; font-weight: 600; }}
-QPushButton#navButton:hover {{ background: #141d3d; color: {TEXT}; }}
-QPushButton#navButton:checked {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #1d2f63, stop:1 #2a2160);
-    color: {TEXT}; border-left: 3px solid {CYAN}; }}
-QPushButton#allowOn {{ background: {OK}; color: #04140a; }}
-QPushButton#allowOn:hover {{ background: #16a34a; }}
-QPushButton#allowOff {{ background: #3a1620; color: #ffb4bd; border: 1px solid #5a1f2c; }}
-QPushButton#allowOff:hover {{ background: #4b1b28; }}
-QLineEdit, QComboBox {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 9px; padding: 9px 11px;
-    color: {TEXT}; selection-background-color: {VIOLET}; }}
-QLineEdit:focus, QComboBox:focus {{ border: 1px solid {CYAN}; }}
-QComboBox QAbstractItemView {{ background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER};
-    selection-background-color: #25346b; }}
-QListWidget {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 10px; padding: 4px; outline: 0; }}
-QListWidget::item {{ padding: 6px 8px; border-radius: 6px; }}
-QListWidget::item:hover {{ background: #141d3d; }}
-QLabel#chip {{ border-radius: 11px; padding: 4px 12px; font-weight: 700; font-size: 12px;
-    background: #1a2342; color: {MUTED}; border: 1px solid {BORDER}; }}
-QLabel#chip[state="ok"] {{ background: #0f2a1d; color: {OK}; border: 1px solid #14532d; }}
-QLabel#chip[state="warn"] {{ background: #2e2208; color: {WARN}; border: 1px solid #5b4310; }}
-QLabel#chip[state="bad"] {{ background: #331219; color: {BAD}; border: 1px solid #5a1f2c; }}
+    background: {g('surface')}; border: 1px solid {g('border')}; border-radius: 10px; }}
+QFrame#appRow QWidget {{ background: transparent; }}
+QPushButton {{ background: {g('accent')}; color: {g('accent_text')}; border: 0; border-radius: 7px;
+    padding: 8px 16px; font-weight: 600; }}
+QPushButton:hover {{ background: {g('accent_hover')}; }}
+QPushButton:disabled {{ background: {g('surface2')}; color: {g('muted')}; border: 1px solid {g('border')}; }}
+QPushButton#secondaryButton {{ background: {g('surface')}; color: {g('text')}; border: 1px solid {g('border')}; }}
+QPushButton#secondaryButton:hover {{ background: {g('surface2')}; }}
+QPushButton#secondaryButton:checked {{ background: {g('accent_soft')}; border-color: {g('accent')}; }}
+QPushButton#navButton {{ background: transparent; color: {g('muted')}; text-align: left; padding: 9px 12px;
+    border-radius: 7px; font-weight: 500; }}
+QPushButton#navButton:hover {{ background: {g('surface2')}; color: {g('text')}; }}
+QPushButton#navButton:checked {{ background: {g('accent_soft')}; color: {g('accent')}; font-weight: 600; }}
+QPushButton#linkButton {{ background: transparent; color: {g('text')}; border: 0; padding: 0;
+    text-align: left; font-size: 14px; font-weight: 600; }}
+QPushButton#linkButton:hover {{ color: {g('accent')}; background: transparent; }}
+QPushButton#smallButton {{ background: {g('surface')}; color: {g('text')}; border: 1px solid {g('border')};
+    padding: 4px 10px; font-weight: 500; font-size: 12px; }}
+QPushButton#smallButton:hover {{ background: {g('surface2')}; }}
+QPushButton#smallButton:disabled {{ color: {g('muted')}; }}
+QLineEdit, QComboBox {{ background: {g('surface')}; border: 1px solid {g('border')}; border-radius: 7px;
+    padding: 8px 10px; selection-background-color: {g('accent')}; selection-color: {g('accent_text')}; }}
+QLineEdit:focus, QComboBox:focus {{ border: 1px solid {g('accent')}; }}
+QComboBox QAbstractItemView {{ background: {g('surface')}; color: {g('text')}; border: 1px solid {g('border')};
+    selection-background-color: {g('accent_soft')}; selection-color: {g('text')}; }}
+QListWidget {{ background: {g('surface')}; border: 1px solid {g('border')}; border-radius: 8px; padding: 3px; outline: 0; }}
+QListWidget::item {{ padding: 6px 8px; border-radius: 5px; }}
+QListWidget::item:hover {{ background: {g('surface2')}; }}
+QLabel#chip {{ border-radius: 10px; padding: 3px 11px; font-size: 12px; font-weight: 500;
+    background: {g('surface2')}; color: {g('muted')}; border: 1px solid {g('border')}; }}
+QLabel#chip[state="ok"] {{ background: {g('ok_bg')}; color: {g('ok')}; border: 1px solid {g('ok_bg')}; }}
+QLabel#chip[state="warn"] {{ background: {g('warn_bg')}; color: {g('warn')}; border: 1px solid {g('warn_bg')}; }}
+QLabel#chip[state="bad"] {{ background: {g('bad_bg')}; color: {g('bad')}; border: 1px solid {g('bad_bg')}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #25316a; border-radius: 4px; min-height: 30px; }}
+QScrollBar::handle:vertical {{ background: {g('border')}; border-radius: 4px; min-height: 30px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-QToolTip {{ background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER}; padding: 6px; }}
-QMessageBox {{ background: {SURFACE}; }}
+QToolTip {{ background: {g('surface')}; color: {g('text')}; border: 1px solid {g('border')}; padding: 5px; }}
+QMessageBox {{ background: {g('surface')}; }}
 """
+
+
+def _settings() -> QSettings:
+    return QSettings("SecureWorkAI", "SecureWorkAI")
+
+
+def saved_mode() -> str:
+    try:
+        value = str(_settings().value("theme", "light"))
+    except Exception:
+        value = "light"
+    return value if value in ("light", "dark") else "light"
+
+
+def apply(new_mode: str, save: bool = True) -> None:
+    global _mode
+    _mode = new_mode if new_mode in ("light", "dark") else "light"
+    app = QApplication.instance()
+    if app is not None:
+        app.setStyleSheet(build_stylesheet())
+        for w in app.allWidgets():
+            w.update()
+    if save:
+        try:
+            _settings().setValue("theme", _mode)
+        except Exception:
+            pass
+    signals.changed.emit(_mode)
