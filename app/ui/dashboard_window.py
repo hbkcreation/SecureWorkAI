@@ -10,6 +10,8 @@ from app.ml.predict import DEFAULT_MODEL_PATH
 from app.security.flow_aggregator import LiveFlowAggregator
 from app.security.ids_service import FeatureCompatibilityError, IDSService
 from app.security.network_monitor import NetworkInterface, NetworkMonitor
+from app.security.rule_ids import ProtocolCounter, RuleBasedIDS
+from app.ui.protocol_chart import ProtocolPieChart
 from app.security.usb_checker import USBAdapterChecker, USBAdapterStatus, STATUS_APPROVED
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,11 @@ class DashboardWindow(QMainWindow):
         self.flow_aggregator = LiveFlowAggregator(on_flow_completed=self.ids_service.inspect_completed_flow)
         self._packet_callback = self.flow_aggregator.process_packet
         self.network_monitor.add_packet_callback(self._packet_callback)
+        self.rule_ids = RuleBasedIDS()
+        self.protocol_counter = ProtocolCounter()
+        self.network_monitor.add_packet_callback(self.rule_ids.process_packet)
+        self.network_monitor.add_packet_callback(self.protocol_counter.add)
+        self._logged_rule_alerts = 0
         self._usb_worker: _USBCheckWorker | None = None
         self._ids_model_worker: _ActionWorker | None = None
         self._action_workers: set[_ActionWorker] = set()
@@ -159,6 +166,38 @@ class DashboardWindow(QMainWindow):
         ids_layout.addWidget(self.ids_event_log)
         ids_layout.addLayout(ids_buttons)
         layout.addWidget(ids_card)
+
+        rule_card = QFrame()
+        rule_card.setObjectName("statusCard")
+        rule_layout = QVBoxLayout(rule_card)
+        rule_heading = QLabel("Live Intrusion Detection (rule-based)")
+        rule_heading.setObjectName("cardHeading")
+        self.rule_ids_status_label = QLabel("Rule-based IDS: waiting for monitoring to start")
+        self.rule_ids_status_label.setObjectName("statusValue")
+        rule_note = QLabel(
+            "Detects port scans, SYN floods and abnormal packet rates from live packet metadata. "
+            "Alerts are signals, not proof of compromise. The ML model remains gated."
+        )
+        rule_note.setObjectName("muted")
+        rule_note.setWordWrap(True)
+        self.rule_ids_log = QListWidget()
+        self.rule_ids_log.setMaximumHeight(110)
+        self.rule_ids_log.addItem("No rule-based alerts.")
+        rule_layout.addWidget(rule_heading)
+        rule_layout.addWidget(self.rule_ids_status_label)
+        rule_layout.addWidget(rule_note)
+        rule_layout.addWidget(self.rule_ids_log)
+        layout.addWidget(rule_card)
+
+        chart_card = QFrame()
+        chart_card.setObjectName("statusCard")
+        chart_layout = QVBoxLayout(chart_card)
+        chart_heading = QLabel("Live packets by protocol")
+        chart_heading.setObjectName("cardHeading")
+        self.protocol_chart = ProtocolPieChart()
+        chart_layout.addWidget(chart_heading)
+        chart_layout.addWidget(self.protocol_chart)
+        layout.addWidget(chart_card)
 
         system_card = QFrame()
         system_card.setObjectName("statusCard")
@@ -485,6 +524,32 @@ class DashboardWindow(QMainWindow):
             self.refresh_interfaces_button.setEnabled(not active)
         self._refresh_system_status()
         self._refresh_ids_snapshot()
+        self._refresh_rule_ids(active)
+
+    def _refresh_rule_ids(self, capture_active: bool) -> None:
+        if capture_active and not self.rule_ids.active:
+            self.protocol_counter.reset()
+            self.rule_ids.start()
+        elif not capture_active and self.rule_ids.active:
+            self.rule_ids.stop()
+        alerts = self.rule_ids.alerts
+        state = "ACTIVE" if self.rule_ids.active else "STOPPED"
+        self.rule_ids_status_label.setText(
+            f"Rule-based IDS: {state} | packets checked: {self.rule_ids.packets_checked} | alerts: {len(alerts)}"
+        )
+        for alert in alerts[self._logged_rule_alerts:]:
+            logging.getLogger(__name__).warning(
+                "Rule IDS %s (%s) %s -> %s: %s", alert.rule, alert.severity, alert.source_ip, alert.target_ip, alert.detail
+            )
+        self._logged_rule_alerts = len(alerts)
+        rendered = [
+            f"{a.severity.upper()} | {a.rule} | {a.source_ip} -> {a.target_ip} | {a.detail}" for a in alerts[-5:]
+        ] or ["No rule-based alerts."]
+        existing = [self.rule_ids_log.item(i).text() for i in range(self.rule_ids_log.count())]
+        if rendered != existing:
+            self.rule_ids_log.clear()
+            self.rule_ids_log.addItems(rendered)
+        self.protocol_chart.set_counts(self.protocol_counter.snapshot())
 
     def _refresh_ids_snapshot(self) -> None:
         status = self.ids_service.model_status

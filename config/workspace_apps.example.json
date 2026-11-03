@@ -1,0 +1,7 @@
+{
+  "approved_apps": [
+    {"name": "Notepad", "command": "notepad.exe"},
+    {"name": "Calculator", "command": "calc.exe"},
+    {"name": "Microsoft Edge", "command": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"}
+  ]
+}
