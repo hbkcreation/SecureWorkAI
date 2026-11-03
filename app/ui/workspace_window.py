@@ -13,24 +13,12 @@ from app.security.app_discovery import discover_installed_apps
 from app.security.workspace_apps import (DEFAULT_CONFIG, WorkspaceApp, launch, load_workspace_apps,
                                          save_workspace_apps)
 
-STYLE = """
-QFrame#appRow { background: white; border: 1px solid #dce5ef; border-radius: 10px; }
-QLabel#appName { font-weight: 600; color: #102a43; }
-QPushButton#allowOn { background: #16794b; }
-QPushButton#allowOn:hover { background: #11623d; }
-QPushButton#allowOff { background: #b42318; }
-QPushButton#allowOff:hover { background: #8f1c12; }
-QPushButton:disabled { background: #c7d0dc; color: #f4f7fb; }
-"""
-
-
 class WorkspaceWindow(QMainWindow):
     def __init__(self, config_path=None, discovered: list[WorkspaceApp] | None = None) -> None:
         super().__init__()
         self.config_path = config_path or DEFAULT_CONFIG
         self.setWindowTitle("SecureWork AI | Secure Workspace")
-        self.setMinimumSize(520, 460)
-        self.setStyleSheet(STYLE)
+        self.setMinimumSize(560, 520)
         self.approved: list[WorkspaceApp] = load_workspace_apps(self.config_path)
         self._injected = discovered
         self.rows: dict[str, tuple[QPushButton, QPushButton]] = {}
@@ -40,6 +28,8 @@ class WorkspaceWindow(QMainWindow):
         outer = QVBoxLayout(central)
         title = QLabel("Secure Workspace")
         title.setObjectName("pageTitle")
+        outer.setContentsMargins(22, 20, 22, 20)
+        outer.setSpacing(12)
         self.summary = QLabel()
         self.summary.setObjectName("muted")
         bar = QHBoxLayout()
@@ -91,8 +81,10 @@ class WorkspaceWindow(QMainWindow):
     def _render(self) -> None:
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)  # detach now so no stale row is painted
+                widget.deleteLater()
         self.rows.clear()
         needle = self.search.text().strip().lower()
         shown = [a for a in self._all if needle in a.name.lower() or needle in a.command.lower()]

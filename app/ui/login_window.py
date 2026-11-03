@@ -2,7 +2,7 @@
 import logging
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFrame, QFormLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
     QVBoxLayout, QWidget,
 )
 from app.security.auth import AccountStoreStatus, account_store_status, authenticate
@@ -15,59 +15,82 @@ class LoginWindow(QMainWindow):
         super().__init__()
         self._on_login_success = on_login_success
         self.setWindowTitle("SecureWork AI | Sign in")
-        self.setMinimumSize(480, 560)
+        self.setMinimumSize(900, 560)
 
         central = QWidget()
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(42, 36, 42, 36)
-        outer.setSpacing(20)
-        outer.addStretch(1)
+        row = QHBoxLayout(central)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
 
-        title = QLabel("SecureWork AI")
+        # Brand panel
+        hero = QFrame()
+        hero.setStyleSheet(
+            "QFrame { background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #14246b, stop:0.55 #3b1d8f,"
+            " stop:1 #0a0e1a); border: 0; } QLabel { background: transparent; }"
+        )
+        hl = QVBoxLayout(hero)
+        hl.setContentsMargins(48, 56, 48, 48)
+        logo = QLabel("◈")
+        logo.setStyleSheet("font-size: 54px; color: #38bdf8;")
+        headline = QLabel("SecureWork AI")
+        headline.setStyleSheet("font-size: 38px; font-weight: 800; color: white;")
+        sub = QLabel("A protected workspace for the personal device you use for work.")
+        sub.setWordWrap(True)
+        sub.setStyleSheet("font-size: 15px; color: #c7d2fe;")
+        hl.addWidget(logo)
+        hl.addWidget(headline)
+        hl.addWidget(sub)
+        hl.addSpacing(26)
+        for text in ("●  Live network monitoring and flow analysis",
+                     "●  Rule-based and Random Forest intrusion signals",
+                     "●  Approved-application workspace",
+                     "●  USB Wi-Fi adapter verification"):
+            item = QLabel(text)
+            item.setStyleSheet("font-size: 14px; color: #e0e7ff; padding: 4px 0;")
+            hl.addWidget(item)
+        hl.addStretch(1)
+        foot = QLabel("Prototype · alerts are signals, not proof of compromise")
+        foot.setStyleSheet("font-size: 12px; color: #a5b4fc;")
+        hl.addWidget(foot)
+        row.addWidget(hero, 5)
+
+        # Form panel
+        right = QWidget()
+        outer = QVBoxLayout(right)
+        outer.setContentsMargins(56, 36, 56, 36)
+        outer.setSpacing(14)
+        outer.addStretch(1)
+        title = QLabel("Welcome back")
         title.setObjectName("pageTitle")
-        title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel("Secure workspace for your personal device")
+        subtitle = QLabel("Sign in to enter your secure workspace")
         subtitle.setObjectName("muted")
-        subtitle.setAlignment(Qt.AlignCenter)
         outer.addWidget(title)
         outer.addWidget(subtitle)
-
-        form_card = QFrame()
-        form_card.setObjectName("panel")
-        form = QFormLayout(form_card)
-        form.setContentsMargins(24, 24, 24, 24)
-        form.setSpacing(14)
+        outer.addSpacing(10)
+        ulabel = QLabel("USERNAME")
+        ulabel.setObjectName("cardHeading")
         self.username = QLineEdit()
         self.username.setPlaceholderText("Enter your username")
         self.username.setText("")
+        plabel = QLabel("PASSWORD")
+        plabel.setObjectName("cardHeading")
         self.password = QLineEdit()
         self.password.setPlaceholderText("Enter your password")
         self.password.setEchoMode(QLineEdit.Password)
         self.password.returnPressed.connect(self._login)
-        form.addRow("Username", self.username)
-        form.addRow("Password", self.password)
-        outer.addWidget(form_card)
-
+        for w in (ulabel, self.username, plabel, self.password):
+            outer.addWidget(w)
         self.message = QLabel(" ")
         self.message.setObjectName("message")
-        self.message.setAlignment(Qt.AlignCenter)
+        self.message.setWordWrap(True)
         outer.addWidget(self.message)
-        login_button = QPushButton("Login")
+        login_button = QPushButton("Sign in")
+        login_button.setCursor(Qt.PointingHandCursor)
+        login_button.setMinimumHeight(42)
         login_button.clicked.connect(self._login)
         outer.addWidget(login_button)
-
-        security = QFrame()
-        security.setObjectName("securityBox")
-        security_layout = QVBoxLayout(security)
-        security_title = QLabel("Security status")
-        security_title.setObjectName("cardHeading")
-        security_copy = QLabel("Local prototype • Monitoring features are not active")
-        security_copy.setObjectName("muted")
-        security_copy.setWordWrap(True)
-        security_layout.addWidget(security_title)
-        security_layout.addWidget(security_copy)
-        outer.addWidget(security)
         outer.addStretch(1)
+        row.addWidget(right, 4)
         self.setCentralWidget(central)
         self._show_account_store_status()
 
