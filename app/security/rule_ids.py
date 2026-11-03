@@ -18,6 +18,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 
 from app.security.network_monitor import PacketRecord
+from app.security.traffic_filters import is_noise_destination
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,8 @@ class RuleBasedIDS:
             if not self.active:
                 return
             self.packets_checked += 1
+            if is_noise_destination(p.destination_ip):
+                return  # discovery chatter (multicast/broadcast) is not an attack
             now, cutoff = p.timestamp, p.timestamp - self.window
             if now - self._last_prune > max(self.window, 5.0):
                 self._last_prune = now

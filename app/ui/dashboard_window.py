@@ -519,9 +519,10 @@ class DashboardWindow(QMainWindow):
 
     def raise_alert(self, info: AlertInfo, force: bool = False) -> None:
         """Show alert mode on screen and email the user (rate limited; duplicates are suppressed)."""
-        key = (info.kind, info.source, info.target)
+        key = (info.kind, info.source, info.target, info.origin)
         now = time.monotonic()
-        if not force and now - self._alert_seen.get(key, -1e9) < 60:
+        cooldown = 300.0 if info.origin == "ml" else 60.0  # the experimental model repeats itself; keep it quiet
+        if not force and now - self._alert_seen.get(key, -1e9) < cooldown:
             return
         self._alert_seen[key] = now
         self.alert_history.append(info)
@@ -531,16 +532,20 @@ class DashboardWindow(QMainWindow):
         self.alert_banner_text.setText(f"{info.title}  ·  {info.detail}")
         self.alert_banner.show()
         self.setWindowTitle("⚠ ALERT | SecureWork AI")
-        if (info.severity in ("high", "critical") and now - self._last_dialog >= 10.0) or info.kind == "TEST":
-            self._last_dialog = now  # at most one pop-up per 10 s, so an attack cannot bury the screen
-            self._open_alert_dialog(info)
+        wants_popup = (info.origin == "rule" and info.severity in ("high", "critical")) or info.kind == "TEST"
+        if wants_popup and self.popups_enabled.isChecked():
+            self._open_alert_dialog(info)  # ML alerts show the banner only (experimental, can be wrong)
         QApplication.beep()
         QApplication.alert(self, 0)
         queued = self.email_notifier.notify(info, force=force)
         logger.warning("ALERT %s (%s): %s | email queued: %s", info.kind, info.severity, info.detail, queued)
 
     def _open_alert_dialog(self, info: AlertInfo) -> None:
-        self._alert_dialogs = [d for d in self._alert_dialogs if d.isVisible()][-2:]
+        """At most ONE alert window exists. If it is already open, only count the new alert."""
+        self._alert_dialogs = [d for d in self._alert_dialogs if d.isVisible()]
+        if self._alert_dialogs:
+            self._alert_dialogs[0].add_more()
+            return
         dialog = AlertDialog(info, self)
         self._alert_dialogs.append(dialog)
         dialog.show()
@@ -591,7 +596,7 @@ class DashboardWindow(QMainWindow):
                 self.raise_alert(AlertInfo(label.upper(), sev, ml_titles.get(label, label),
                                            f"{len(items)} flow(s) flagged, up to {best:.0%} confidence (experimental model)",
                                            "multiple sources" if many else items[0].source_ip,
-                                           f"{items[0].destination_ip}:{items[0].destination_port}"))
+                                           f"{items[0].destination_ip}:{items[0].destination_port}", origin="ml"))
 
     # ------------------------------------------------------------ alerts tab
     def _page_alerts(self) -> QWidget:
@@ -670,12 +675,15 @@ class DashboardWindow(QMainWindow):
         lay.addWidget(email_card)
 
         prev_card, pl = card("Alert screen")
+        self.popups_enabled = QCheckBox("Show a pop-up window for serious alerts (the red banner is always shown)")
+        self.popups_enabled.setChecked(True)
         pn = QLabel("See what alert mode looks like. This sends nothing and detects nothing.")
         pn.setObjectName("muted")
         self.alert_preview_button = QPushButton("Preview alert screen")
         self.alert_preview_button.setObjectName("secondaryButton")
         self.alert_preview_button.clicked.connect(lambda: self.raise_alert(
             AlertInfo("TEST", "high", "Test alert", "This is only a preview.", "test", "test"), force=True))
+        pl.addWidget(self.popups_enabled)
         pl.addWidget(pn)
         pl.addWidget(self.alert_preview_button, alignment=Qt.AlignLeft)
         lay.addWidget(prev_card)

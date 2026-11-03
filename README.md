@@ -228,7 +228,7 @@ PostgreSQL DDL: `db/schema.sql`. Kibana: http://127.0.0.1:5601 → create a data
 - **Phishing:** SecureWork AI reads network metadata and running programs, not message content, so it **cannot detect phishing**. Alert emails and pop-ups include phishing guidance (do not click, change the password, report it, enable MFA) as general advice only.
 - **Apps tab:** the old separate workspace window is now a tab in the main window. Allow/Block apps, see their location and real icons, and turn on **Monitor running apps** to get an alert when an installed app that is not allowed is running (checked every 15 s; system/background processes are ignored on purpose).
 - **Full verification** (`app/security/verification.py`, System tab): USB adapter approved, monitoring running, rule IDS active, ML running, at least one app allowed, app monitoring on (6 checks; email is optional and not checked). All must pass; it drops back to *Partially verified* if one stops passing.
-- Tested: 202 unit tests (mocked SMTP, offscreen Qt). Not tested on Windows, with a real mail server, or with real packet capture.
+- Tested: 209 unit tests (mocked SMTP, offscreen Qt). Not tested on Windows, with a real mail server, or with real packet capture.
 
 
 ## Email alerts are optional and use your own account
@@ -245,3 +245,10 @@ Measured on this project's stress harness (synthetic packets, many unique flows,
 | 10,000 pkt/s | ~1,600 pkt/s, GUI frozen for seconds (3 ticks in 8 s) | GUI stays responsive (p95 ~40 ms); analysis lags behind and a bounded queue drops excess instead of freezing |
 
 What changed: O(1) idle-flow expiry (it used to scan every active flow for every packet), a `PacketPipeline` worker so capture only enqueues, batched ML scoring, bounded memory (flow table capped at 100,000, rule-IDS state pruned), refreshing only the visible tab, and grouping/throttling alerts so an attack produces one alert per kind instead of hundreds. Numbers depend on the machine; real Npcap capture on Windows was not measured. Packets skipped under overload are shown on the Overview.
+
+
+## Fewer, calmer alerts
+
+- **One pop-up at most.** If an alert window is already open, new alerts only bump a counter in it ("N more alerts since this window opened"). Pop-ups appear only for rule-based high/critical alerts; the experimental ML alerts show the red banner only. A checkbox in **Alerts** turns pop-ups off (the banner always stays).
+- **ML alerts repeat at most every 5 minutes** per kind, and an attack label needs at least 80% confidence (weaker guesses count as normal), because the model is trained on synthetic data and real traffic is often out of its depth.
+- **Discovery chatter is ignored.** Flows to multicast/broadcast addresses (SSDP `239.255.255.250`, mDNS, WS-Discovery) are not scored by the ML and do not feed the traffic-rate rule.
