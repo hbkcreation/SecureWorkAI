@@ -146,7 +146,9 @@ class DashboardWindow(QMainWindow):
         self.stop_ids_button = QPushButton("Stop IDS Analysis")
         self.start_ids_button.setEnabled(False)
         self.stop_ids_button.setEnabled(False)
-        self.start_ids_button.setToolTip("Disabled until all model features have verified live semantics.")
+        self.start_ids_button.setText("Start ML analysis (unavailable)")
+        self.stop_ids_button.setText("Stop ML analysis")
+        self.start_ids_button.setToolTip("ML analysis stays disabled until all model features have verified live semantics. The rule-based IDS below runs without it.")
         self.stop_ids_button.setToolTip("No compatible live IDS analysis is active.")
         self.start_ids_button.clicked.connect(self.start_ids_analysis)
         self.stop_ids_button.clicked.connect(self.stop_ids_analysis)
@@ -187,6 +189,11 @@ class DashboardWindow(QMainWindow):
         rule_layout.addWidget(self.rule_ids_status_label)
         rule_layout.addWidget(rule_note)
         rule_layout.addWidget(self.rule_ids_log)
+        self.rule_ids_pause_button = QPushButton("Pause rule-based IDS")
+        self.rule_ids_pause_button.setCheckable(True)
+        self.rule_ids_pause_button.setObjectName("secondaryButton")
+        self.rule_ids_pause_button.toggled.connect(self._toggle_rule_ids_pause)
+        rule_layout.addWidget(self.rule_ids_pause_button)
         layout.addWidget(rule_card)
 
         chart_card = QFrame()
@@ -518,6 +525,12 @@ class DashboardWindow(QMainWindow):
         active = self.network_monitor.is_active()
         selected_item = self.network_interface_combo.currentData()
         can_start = isinstance(selected_item, NetworkInterface) and selected_item.approved
+        if status != "ERROR" and not active and not can_start and not self._network_action_busy:
+            self.network_error_label.setText(
+                self.network_monitor.selection_error
+                or "Start Monitoring is disabled: select a network interface that matches the approved USB "
+                   "Wi-Fi adapter in config/device_policy.json."
+            )
         if not self._network_action_busy:
             self.start_monitoring_button.setEnabled(not active and can_start)
             self.stop_monitoring_button.setEnabled(active)
@@ -526,7 +539,14 @@ class DashboardWindow(QMainWindow):
         self._refresh_ids_snapshot()
         self._refresh_rule_ids(active)
 
+    def _toggle_rule_ids_pause(self, paused: bool) -> None:
+        self._rule_ids_paused = paused
+        self.rule_ids_pause_button.setText("Resume rule-based IDS" if paused else "Pause rule-based IDS")
+
     def _refresh_rule_ids(self, capture_active: bool) -> None:
+        paused = getattr(self, "_rule_ids_paused", False)
+        if paused:
+            capture_active = False
         if capture_active and not self.rule_ids.active:
             self.protocol_counter.reset()
             self.rule_ids.start()
