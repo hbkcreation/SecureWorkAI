@@ -33,9 +33,7 @@ class SecureWorkApplication:
         logging.getLogger(__name__).info("User logged out")
         if self.network_monitor.is_active():
             self.network_monitor.stop_capture()
-        if self.workspace_window is not None:
-            self.workspace_window.close()
-            if self.dashboard_window is not None:
+        if self.dashboard_window is not None:
             self.dashboard_window.close()
             self.dashboard_window = None
         self.login_window.password.clear()
