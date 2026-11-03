@@ -138,7 +138,8 @@ class MLEvent:
 class LiveMLAnalyzer:
     """Scores completed live flows with the synthetic-trained Random Forest."""
 
-    def __init__(self, model_path: Path = MODEL_PATH, max_events: int = 200) -> None:
+    def __init__(self, model_path: Path = MODEL_PATH, max_events: int = 200, batch: bool = False,
+                 max_pending: int = 5000) -> None:
         self.model_path = Path(model_path)
         self._lock = threading.Lock()
         self._model = None
@@ -147,6 +148,9 @@ class LiveMLAnalyzer:
         self.flows_scored = 0
         self.attack_flows = 0
         self.error: str | None = None
+        self.batch = batch
+        self._pending: deque[CompletedFlow] = deque(maxlen=max_pending)
+        self.dropped_flows = 0
 
     @property
     def loaded(self) -> bool:
@@ -191,18 +195,41 @@ class LiveMLAnalyzer:
     def inspect_completed_flow(self, flow: CompletedFlow) -> None:
         if not self.active or not self.loaded:
             return
+        if self.batch:  # queue now, score many flows at once in flush() (much cheaper than one by one)
+            with self._lock:
+                if len(self._pending) == self._pending.maxlen:
+                    self.dropped_flows += 1
+                self._pending.append(flow)
+            return
+        self._score([flow])
+
+    def flush(self) -> int:
+        """Score all queued flows with one vectorised model call. Returns how many were scored."""
+        with self._lock:
+            flows = list(self._pending)
+            self._pending.clear()
+        if flows and self.active and self.loaded:
+            self._score(flows)
+        return len(flows)
+
+    def _score(self, flows: list[CompletedFlow]) -> None:
         try:
-            label, p = self.predict_flow(flow)
+            x = np.array([features_from_flow(f) for f in flows])
+            proba = self._model.predict_proba(x)
+            idx = proba.argmax(axis=1)
+            labels = [str(self._model.classes_[i]) for i in idx]
+            confs = proba[np.arange(len(flows)), idx]
         except Exception as exc:  # never break capture because of the analyzer
             self.error = str(exc)
             return
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._lock:
-            self.flows_scored += 1
-            if label != "normal":
-                self.attack_flows += 1
-            self._events.append(MLEvent(datetime.now(timezone.utc).isoformat(timespec="seconds"), label,
-                                        SEVERITY.get(label, "SUSPICIOUS"), p, flow.source_ip,
-                                        flow.destination_ip, flow.destination_port, flow.protocol))
+            for f, label, p in zip(flows, labels, confs):
+                self.flows_scored += 1
+                if label != "normal":
+                    self.attack_flows += 1
+                self._events.append(MLEvent(stamp, label, SEVERITY.get(label, "SUSPICIOUS"), float(p), f.source_ip,
+                                            f.destination_ip, f.destination_port, f.protocol))
 
 
 if __name__ == "__main__":

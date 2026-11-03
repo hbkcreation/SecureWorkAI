@@ -6,6 +6,7 @@ import math
 import numbers
 import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -318,7 +319,7 @@ class LiveFlowAggregator:
         self.idle_timeout_seconds = float(idle_timeout_seconds)
         self.on_flow_completed = on_flow_completed
         self._lock = threading.RLock()
-        self._active: dict[BidirectionalFlowKey, _ActiveFlow] = {}
+        self._active: OrderedDict[BidirectionalFlowKey, _ActiveFlow] = OrderedDict()  # oldest activity first
         self._completed_count = 0
         self._malformed_count = 0
 
@@ -359,13 +360,15 @@ class LiveFlowAggregator:
         timestamp = float(packet.timestamp)
 
         with self._lock:
-            expired = [
-                flow_key for flow_key, flow in self._active.items()
-                if timestamp >= flow.last_seen
-                and timestamp - flow.last_seen >= self.idle_timeout_seconds
-            ]
-            for flow_key in expired:
-                emitted.append(self._finish_locked(flow_key, "idle_timeout"))
+            # Flows are kept in order of last activity, so only the oldest ones can be idle:
+            # stop at the first live flow instead of scanning every active flow per packet.
+            while self._active:
+                oldest_key = next(iter(self._active))
+                oldest = self._active[oldest_key]
+                if timestamp >= oldest.last_seen and timestamp - oldest.last_seen >= self.idle_timeout_seconds:
+                    emitted.append(self._finish_locked(oldest_key, "idle_timeout"))
+                else:
+                    break
 
             flow = self._active.get(key)
             if flow is None:
@@ -379,6 +382,7 @@ class LiveFlowAggregator:
                 )
                 self._active[key] = flow
             flow.add(packet)
+            self._active.move_to_end(key)
 
         self._notify(emitted)
         return tuple(emitted)

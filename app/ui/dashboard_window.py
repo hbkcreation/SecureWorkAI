@@ -14,6 +14,7 @@ from app.ml.predict import DEFAULT_MODEL_PATH
 from app.security.flow_aggregator import LiveFlowAggregator
 from app.security.ids_service import FeatureCompatibilityError, IDSService
 from app.security.network_monitor import NetworkInterface, NetworkMonitor
+from app.security.packet_pipeline import PacketPipeline
 from app.security.rule_ids import ProtocolCounter, RuleBasedIDS
 from app.ml.live_synthetic import LiveMLAnalyzer
 from app.security.alert_email import (EmailConfig, EmailNotifier, load_config as load_email_config,
@@ -104,12 +105,16 @@ class DashboardWindow(QMainWindow):
         self.ids_service = IDSService(DEFAULT_MODEL_PATH)
         self.ml_analyzer = LiveMLAnalyzer()
         self.flow_aggregator = LiveFlowAggregator(on_flow_completed=self._on_flow_completed)
-        self._packet_callback = self.flow_aggregator.process_packet
-        self.network_monitor.add_packet_callback(self._packet_callback)
         self.rule_ids = RuleBasedIDS()
         self.protocol_counter = ProtocolCounter()
-        self.network_monitor.add_packet_callback(self.rule_ids.process_packet)
-        self.network_monitor.add_packet_callback(self.protocol_counter.add)
+        self.ml_analyzer.batch = True
+        self.packet_pipeline = PacketPipeline(
+            [self.flow_aggregator.process_packet, self.rule_ids.process_packet, self.protocol_counter.add],
+            after_batch=self.ml_analyzer.flush,
+        )
+        self.packet_pipeline.start()
+        self._packet_callback = self.packet_pipeline.submit  # capture thread only enqueues
+        self.network_monitor.add_packet_callback(self._packet_callback)
         self._logged_rule_alerts = 0
         self.email_config = load_email_config()
         self.email_notifier = EmailNotifier(lambda: self.email_config)
@@ -123,6 +128,8 @@ class DashboardWindow(QMainWindow):
         self._full_verification = False
         self._app_monitor_busy = False
         self._banner_info = None
+        self._last_dialog = -1e9
+        self._history_dirty = False
         self._usb_worker: _USBCheckWorker | None = None
         self._ids_model_worker: _ActionWorker | None = None
         self._action_workers: set[_ActionWorker] = set()
@@ -269,6 +276,9 @@ class DashboardWindow(QMainWindow):
         self.page_title.setText(names[index])
         for i, btn in enumerate(self._nav_buttons):
             btn.setChecked(i == index)
+        if hasattr(self, "_network_timer"):
+            self._history_dirty = True
+            self._refresh_network_snapshot()  # fill the page we just opened right away
         page = self.pages.currentWidget()
         effect = QGraphicsOpacityEffect(page)
         page.setGraphicsEffect(effect)
@@ -515,12 +525,14 @@ class DashboardWindow(QMainWindow):
             return
         self._alert_seen[key] = now
         self.alert_history.append(info)
-        self._render_alert_history()
+        del self.alert_history[:-500]  # keep memory bounded during an attack
+        self._history_dirty = True
         self._banner_info = info
         self.alert_banner_text.setText(f"{info.title}  ·  {info.detail}")
         self.alert_banner.show()
         self.setWindowTitle("⚠ ALERT | SecureWork AI")
-        if info.severity in ("high", "critical") or info.kind == "TEST":
+        if (info.severity in ("high", "critical") and now - self._last_dialog >= 10.0) or info.kind == "TEST":
+            self._last_dialog = now  # at most one pop-up per 10 s, so an attack cannot bury the screen
             self._open_alert_dialog(info)
         QApplication.beep()
         QApplication.alert(self, 0)
@@ -542,30 +554,44 @@ class DashboardWindow(QMainWindow):
         self.setWindowTitle("SecureWork AI | Dashboard")
 
     def _render_alert_history(self) -> None:
+        self._history_dirty = False
         rows = [f"{time.strftime('%H:%M:%S', time.localtime(a.timestamp))}  {a.severity.upper():<9} {a.title}"
                 for a in reversed(self.alert_history[-50:])] or ["No alerts yet."]
         self.alert_history_list.clear()
         self.alert_history_list.addItems(rows)
 
     def _raise_new_alerts(self) -> None:
+        """Turn new detections into alerts, grouped per kind so a flood of events is ONE alert, not hundreds."""
         titles = {"PORT_SCAN": "Port scan detected", "SYN_FLOOD": "SYN flood detected (possible DoS attack)",
                   "HIGH_RATE": "Unusually high traffic rate"}
-        rule_alerts = self.rule_ids.alerts
-        for a in rule_alerts[self._rule_alerts_raised:]:
-            self.raise_alert(AlertInfo(a.rule, a.severity, titles.get(a.rule, a.rule), a.detail,
-                                       a.source_ip, a.target_ip, a.timestamp))
-        self._rule_alerts_raised = len(rule_alerts)
+        groups: dict[str, list] = {}
+        for a in self.rule_ids.alerts_since(self._rule_alerts_raised):
+            groups.setdefault(a.rule, []).append(a)
+        self._rule_alerts_raised = self.rule_ids.alert_count
+        for rule, items in groups.items():
+            first = items[0]
+            many = len({i.source_ip for i in items}) > 1
+            detail = first.detail if len(items) == 1 else f"{len(items)} detections ({first.detail}, ...)"
+            self.raise_alert(AlertInfo(rule, max((i.severity for i in items), key=("low", "medium", "high", "critical").index),
+                                       titles.get(rule, rule), detail, "multiple sources" if many else first.source_ip,
+                                       first.target_ip, first.timestamp))
         ml = self.ml_analyzer
         new = ml.attack_flows - self._ml_attacks_seen
+        self._ml_attacks_seen = ml.attack_flows
         if new > 0:
             ml_titles = {"port_scan": "Port scan flagged by ML", "dos_flood": "Traffic flood flagged by ML",
                          "data_exfiltration": "Large outgoing transfer flagged by ML"}
-            for e in [e for e in ml.events if e.label != "normal"][-new:]:
-                sev = "high" if e.label in ("dos_flood", "data_exfiltration") else "medium"
-                self.raise_alert(AlertInfo(e.label.upper(), sev, ml_titles.get(e.label, e.label),
-                                           f"{e.label} ({e.probability:.0%} confidence, experimental model)",
-                                           e.source_ip, f"{e.destination_ip}:{e.destination_port}"))
-        self._ml_attacks_seen = ml.attack_flows
+            by_label: dict[str, list] = {}
+            for e in [e for e in list(ml.events) if e.label != "normal"][-new:]:
+                by_label.setdefault(e.label, []).append(e)
+            for label, items in by_label.items():
+                sev = "high" if label in ("dos_flood", "data_exfiltration") else "medium"
+                many = len({i.source_ip for i in items}) > 1
+                best = max(i.probability for i in items)
+                self.raise_alert(AlertInfo(label.upper(), sev, ml_titles.get(label, label),
+                                           f"{len(items)} flow(s) flagged, up to {best:.0%} confidence (experimental model)",
+                                           "multiple sources" if many else items[0].source_ip,
+                                           f"{items[0].destination_ip}:{items[0].destination_port}"))
 
     # ------------------------------------------------------------ alerts tab
     def _page_alerts(self) -> QWidget:
@@ -770,7 +796,10 @@ class DashboardWindow(QMainWindow):
             self.ml_status_label.setText("ML analysis: STOPPED (model loaded)")
         elif "preparing" not in self.ml_status_label.text() and "unavailable" not in self.ml_status_label.text():
             self.ml_status_label.setText("ML analysis: OFF")
-        self.ml_counts_label.setText(f"Flows scored: {a.flows_scored} | flagged: {a.attack_flows}")
+        if self.pages.currentIndex() != 2:
+            return
+        dropped = f" | skipped under load: {a.dropped_flows}" if a.dropped_flows else ""
+        self.ml_counts_label.setText(f"Flows scored: {a.flows_scored} | flagged: {a.attack_flows}{dropped}")
         rendered = [
             f"{e.timestamp[11:19]} | {e.label} ({e.probability:.0%}) | {e.source_ip} → {e.destination_ip}:{e.destination_port}"
             for e in a.events[-6:] if e.label != "normal"
@@ -790,26 +819,30 @@ class DashboardWindow(QMainWindow):
             self._rate_last = (now, packets)
         elif not hasattr(self, "_rate_last"):
             self._rate_last = (now, packets)
-        rule_alerts = self.rule_ids.alerts
-        self.kpi_packets.set(packets, "since you started monitoring")
-        self.kpi_flows.set(flows, f"{self.ids_service.flows_checked} checked by UNSW gate")
-        self.kpi_rules.set(len(rule_alerts), "port scan · SYN flood · rate")
-        self.kpi_ml.set(self.ml_analyzer.attack_flows, f"of {self.ml_analyzer.flows_scored} scored")
-        signals = [(a.timestamp, a.severity.upper(), f"{a.rule}  {a.source_ip} → {a.target_ip}  {a.detail}") for a in rule_alerts]
-        signals += [(0.0, "ML", f"{e.label} ({e.probability:.0%})  {e.source_ip} → {e.destination_ip}:{e.destination_port}")
-                    for e in self.ml_analyzer.events if e.label != "normal"]
-        signals.sort(key=lambda s: s[0])
-        rendered = [f"{sev:<9} {text}" for _t, sev, text in signals[-8:]][::-1] or [
-            "Nothing to report yet. Start monitoring and alerts will show up here."]
-        existing = [self.signal_feed.item(i).text() for i in range(self.signal_feed.count())]
-        if rendered != existing:
-            self.signal_feed.clear()
-            for line in rendered:
-                item = QListWidgetItem(line)
-                role = {"CRITICAL": "bad", "HIGH": "bad", "MEDIUM": "warn", "ML": "accent"}.get(
-                    line.split()[0] if line.split() else "", "muted")
-                item.setForeground(QColor(theme.c(role)))
-                self.signal_feed.addItem(item)
+        set_chip_visible = self.pages.currentIndex() == 0
+        if set_chip_visible:
+            rule_alerts = self.rule_ids.alerts_since(max(self.rule_ids.alert_count - 8, 0))
+            dropped = self.packet_pipeline.dropped
+            self.kpi_packets.set(packets, f"{dropped:,} skipped under heavy load" if dropped else "since you started monitoring")
+            self.kpi_flows.set(flows, f"{self.ids_service.flows_checked} checked by UNSW gate")
+            self.kpi_rules.set(self.rule_ids.alert_count, "port scan · SYN flood · rate")
+            self.kpi_ml.set(self.ml_analyzer.attack_flows, f"of {self.ml_analyzer.flows_scored} scored")
+            self.protocol_chart.set_counts(self.protocol_counter.snapshot())
+            signals = [(a.timestamp, a.severity.upper(), f"{a.rule}  {a.source_ip} → {a.target_ip}  {a.detail}") for a in rule_alerts]
+            signals += [(0.0, "ML", f"{e.label} ({e.probability:.0%})  {e.source_ip} → {e.destination_ip}:{e.destination_port}")
+                        for e in list(self.ml_analyzer.events)[-30:] if e.label != "normal"]
+            signals.sort(key=lambda s: s[0])
+            rendered = [f"{sev:<9} {text}" for _t, sev, text in signals[-8:]][::-1] or [
+                "Nothing to report yet. Start monitoring and alerts will show up here."]
+            existing = [self.signal_feed.item(i).text() for i in range(self.signal_feed.count())]
+            if rendered != existing:
+                self.signal_feed.clear()
+                for line in rendered:
+                    item = QListWidgetItem(line)
+                    role = {"CRITICAL": "bad", "HIGH": "bad", "MEDIUM": "warn", "ML": "accent"}.get(
+                        line.split()[0] if line.split() else "", "muted")
+                    item.setForeground(QColor(theme.c(role)))
+                    self.signal_feed.addItem(item)
         set_chip(self.chip_capture, "Capture: running" if self.network_monitor.is_active() else "Capture: stopped",
                  "ok" if self.network_monitor.is_active() else "")
         set_chip(self.chip_rules, "Rule IDS: active" if self.rule_ids.active else "Rule IDS: idle",
@@ -1069,12 +1102,15 @@ class DashboardWindow(QMainWindow):
             self.stop_monitoring_button.setEnabled(active)
             self.refresh_interfaces_button.setEnabled(not active)
         self._refresh_system_status()
-        self._refresh_ids_snapshot()
+        if self.pages.currentIndex() == 2:  # Detection page only: skip list rebuilds when not visible
+            self._refresh_ids_snapshot()
         self._refresh_rule_ids(active)
         self._refresh_ml()
         self._raise_new_alerts()
         self._refresh_overview()
         self._refresh_verification()
+        if self._history_dirty and self.pages.currentIndex() == 4:
+            self._render_alert_history()
         if self.email_notifier.status != getattr(self, "_last_email_status", None):
             self._last_email_status = self.email_notifier.status
             self.email_status_label.setText(self.email_notifier.status)
@@ -1092,24 +1128,26 @@ class DashboardWindow(QMainWindow):
             self.rule_ids.start()
         elif not capture_active and self.rule_ids.active:
             self.rule_ids.stop()
-        alerts = self.rule_ids.alerts
-        state = "ACTIVE" if self.rule_ids.active else "STOPPED"
-        self.rule_ids_status_label.setText(
-            f"Rule-based IDS: {state} | packets checked: {self.rule_ids.packets_checked} | alerts: {len(alerts)}"
-        )
-        for alert in alerts[self._logged_rule_alerts:]:
+        total = self.rule_ids.alert_count
+        for alert in self.rule_ids.alerts_since(self._logged_rule_alerts):
             logging.getLogger(__name__).warning(
                 "Rule IDS %s (%s) %s -> %s: %s", alert.rule, alert.severity, alert.source_ip, alert.target_ip, alert.detail
             )
-        self._logged_rule_alerts = len(alerts)
+        self._logged_rule_alerts = total
+        if self.pages.currentIndex() != 2:
+            return  # nothing visible to update
+        state = "ACTIVE" if self.rule_ids.active else "STOPPED"
+        self.rule_ids_status_label.setText(
+            f"Rule-based IDS: {state} | packets checked: {self.rule_ids.packets_checked} | alerts: {total}"
+        )
+        recent = self.rule_ids.alerts_since(max(total - 5, 0))
         rendered = [
-            f"{a.severity.upper()} | {a.rule} | {a.source_ip} -> {a.target_ip} | {a.detail}" for a in alerts[-5:]
+            f"{a.severity.upper()} | {a.rule} | {a.source_ip} -> {a.target_ip} | {a.detail}" for a in recent
         ] or ["No rule-based alerts."]
         existing = [self.rule_ids_log.item(i).text() for i in range(self.rule_ids_log.count())]
         if rendered != existing:
             self.rule_ids_log.clear()
             self.rule_ids_log.addItems(rendered)
-        self.protocol_chart.set_counts(self.protocol_counter.snapshot())
 
     def _refresh_ids_snapshot(self) -> None:
         status = self.ids_service.model_status
@@ -1245,4 +1283,5 @@ class DashboardWindow(QMainWindow):
         self.ids_service.stop_analysis()
         self.flow_aggregator.finalize_all("dashboard_closed")
         self.network_monitor.remove_packet_callback(self._packet_callback)
+        self.packet_pipeline.stop()
         event.accept()

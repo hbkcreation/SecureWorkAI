@@ -63,6 +63,8 @@ class RuleBasedIDS:
         self._alerts: deque[RuleAlert] = deque(maxlen=max_alerts)
         self.active = False
         self.packets_checked = 0
+        self._alert_total = 0
+        self._last_prune = 0.0
 
     def start(self) -> None:
         with self._lock:
@@ -77,6 +79,26 @@ class RuleBasedIDS:
         with self._lock:
             return tuple(self._alerts)
 
+    @property
+    def alert_count(self) -> int:
+        """Total alerts raised so far (cheap: no copying)."""
+        return self._alert_total
+
+    def alerts_since(self, index: int) -> tuple[RuleAlert, ...]:
+        """Alerts raised after the first `index` (by total count), without copying the whole history."""
+        with self._lock:
+            n = min(max(self._alert_total - index, 0), len(self._alerts))
+            return tuple(self._alerts)[-n:] if n else ()
+
+    def _prune(self, now: float) -> None:
+        """Drop idle tracking state so memory stays bounded under many sources."""
+        cutoff = now - self.window
+        for table in (self._ports, self._syns, self._rate):
+            for key in [k for k, q in table.items() if not q or (q[-1][0] if isinstance(q[-1], tuple) else q[-1]) < cutoff]:
+                del table[key]
+        for key in [k for k, t in self._last_alert.items() if now - t > self.cooldown]:
+            del self._last_alert[key]
+
     def process_packet(self, p: PacketRecord) -> None:
         """Packet-monitor callback; a no-op while stopped."""
         with self._lock:
@@ -84,6 +106,9 @@ class RuleBasedIDS:
                 return
             self.packets_checked += 1
             now, cutoff = p.timestamp, p.timestamp - self.window
+            if now - self._last_prune > max(self.window, 5.0):
+                self._last_prune = now
+                self._prune(now)
             src, dst = p.source_ip, p.destination_ip
 
             r = self._rate[src]
@@ -120,3 +145,4 @@ class RuleBasedIDS:
             return
         self._last_alert[key] = now
         self._alerts.append(RuleAlert(now, rule, severity, src, dst, detail))
+        self._alert_total += 1
