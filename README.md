@@ -227,5 +227,21 @@ PostgreSQL DDL: `db/schema.sql`. Kibana: http://127.0.0.1:5601 → create a data
 - **Email alerts** (`app/security/alert_email.py`): enter your email and SMTP details in **Alerts**. Each alert is emailed with a plain-language explanation and fix steps (`app/security/remediation.py`). Rate limited (one email per alert kind/source per 10 min, 30 s global) and sent on a background thread. Only non-secret settings are stored (`config/alert_email.json`, Git-ignored); the password is kept in memory for the session or read from `SECUREWORK_SMTP_PASSWORD`. For Gmail use an app password. Verified with a mocked SMTP sender; a real SMTP server was not contacted in testing.
 - **Phishing:** SecureWork AI reads network metadata and running programs, not message content, so it **cannot detect phishing**. Alert emails and pop-ups include phishing guidance (do not click, change the password, report it, enable MFA) as general advice only.
 - **Apps tab:** the old separate workspace window is now a tab in the main window. Allow/Block apps, see their location and real icons, and turn on **Monitor running apps** to get an alert when an installed app that is not allowed is running (checked every 15 s; system/background processes are ignored on purpose).
-- **Full verification** (`app/security/verification.py`, System tab): USB adapter approved, monitoring running, rule IDS active, ML running, at least one app allowed, app monitoring on, email set up. All must pass; it drops back to *Partially verified* if one stops passing.
-- Tested: 193 unit tests (mocked SMTP, offscreen Qt). Not tested on Windows, with a real mail server, or with real packet capture.
+- **Full verification** (`app/security/verification.py`, System tab): USB adapter approved, monitoring running, rule IDS active, ML running, at least one app allowed, app monitoring on (6 checks; email is optional and not checked). All must pass; it drops back to *Partially verified* if one stops passing.
+- Tested: 202 unit tests (mocked SMTP, offscreen Qt). Not tested on Windows, with a real mail server, or with real packet capture.
+
+
+## Email alerts are optional and use your own account
+
+Email alerts are off until you set them up in **Alerts**. Pick Gmail, Outlook or Yahoo (server details fill in automatically) or enter your own, then the address to receive alerts. The screen always says exactly which address sends and which receives (*Alerts will be sent from X to Y*), and **Turn email alerts off** clears it. Settings live in `config/alert_email.json`, which is Git-ignored and never contains a password.
+
+## Performance under heavy traffic
+
+Measured on this project's stress harness (synthetic packets, many unique flows, offscreen Qt, one Linux sandbox, GUI 20 ms timer lateness):
+
+| Load | Before | After |
+|---|---|---|
+| 5,000 pkt/s | analysis kept up with only ~1,500 pkt/s; GUI nearly frozen | all packets processed, 0 dropped, GUI p95 lateness ~3 ms |
+| 10,000 pkt/s | ~1,600 pkt/s, GUI frozen for seconds (3 ticks in 8 s) | GUI stays responsive (p95 ~40 ms); analysis lags behind and a bounded queue drops excess instead of freezing |
+
+What changed: O(1) idle-flow expiry (it used to scan every active flow for every packet), a `PacketPipeline` worker so capture only enqueues, batched ML scoring, bounded memory (flow table capped at 100,000, rule-IDS state pruned), refreshing only the visible tab, and grouping/throttling alerts so an attack produces one alert per kind instead of hundreds. Numbers depend on the machine; real Npcap capture on Windows was not measured. Packets skipped under overload are shown on the Overview.

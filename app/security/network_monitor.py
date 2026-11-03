@@ -164,6 +164,8 @@ def extract_packet_features(packet: Any) -> PacketRecord | None:
 
 
 class NetworkMonitor:
+    MAX_TRACKED_FLOWS = 100_000
+
     """Discover approved interfaces, capture metadata, and maintain flow counts.
 
     Capture is opt-in through :meth:`start_capture`. Interfaces are only marked
@@ -459,6 +461,8 @@ class NetworkMonitor:
                     last_seen=max(previous.last_seen, record.timestamp),
                 )
             self._flows[record.flow_key] = flow
+            if len(self._flows) > self.MAX_TRACKED_FLOWS:  # bound memory on long/heavy captures
+                del self._flows[next(iter(self._flows))]
             self._packet_count += 1
 
             packet_callbacks = tuple(self._packet_callbacks)
