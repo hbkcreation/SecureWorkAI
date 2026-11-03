@@ -216,3 +216,43 @@ class NetworkMonitorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdapterMatchingRobustnessTests(unittest.TestCase):
+    def _iface(self, **kw):
+        from app.security.network_monitor import NetworkInterface
+        base = dict(name="Wi-Fi 2", capture_name=r"\Device\NPF_{AAAA1111-2222-3333-4444-555566667777}",
+                    description="Some Vendor USB NIC", mac_address="aa:bb:cc:dd:ee:ff",
+                    interface_id="{AAAA1111-2222-3333-4444-555566667777}")
+        base.update(kw)
+        return NetworkInterface(**base)
+
+    def test_matches_by_guid_or_mac_even_when_names_differ(self):
+        from app.security.network_monitor import NetworkMonitor, _guid, _mac
+        m = NetworkMonitor._matches_approved_interface
+        # names differ completely; GUID from CIM matches the GUID inside Scapy's NPF capture name
+        self.assertTrue(m(self._iface(name="X", description="Y", mac_address=None),
+                          {_guid("{aaaa1111-2222-3333-4444-555566667777}")}))
+        # MAC written differently by CIM (no separators) and Scapy (colons)
+        self.assertTrue(m(self._iface(name="X", description="Y", interface_id=None,
+                                      capture_name=r"\Device\NPF_Loopback"), {_mac("AABBCCDDEEFF")}))
+        self.assertFalse(m(self._iface(), {"something else"}))
+        self.assertFalse(m(self._iface(mac_address="", interface_id=None, capture_name="x"), {""}))
+
+    def test_helpers(self):
+        from app.security.network_monitor import _guid, _mac
+        self.assertEqual(_guid(r"\Device\NPF_{ABCDEF12-0000-0000-0000-000000000001}"), "{abcdef12-0000-0000-0000-000000000001}")
+        self.assertEqual(_guid("nothing"), "")
+        self.assertEqual(_mac("AA-BB-CC-DD-EE-FF"), "aabbccddeeff")
+        self.assertEqual(_mac("12:34"), "")
+
+    def test_override_only_when_policy_flag_true(self):
+        import json, tempfile, os
+        from app.security.network_monitor import NetworkMonitor
+        from app.security.usb_checker import USBAdapterChecker
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "p.json")
+        for value, expected in ((True, True), (False, False), ("yes", False)):
+            json.dump({"approved_usb_wifi_adapters": [], "allow_unapproved_interface_monitoring": value}, open(p, "w"))
+            self.assertIs(NetworkMonitor(usb_checker=USBAdapterChecker(policy_path=p)).override_active, expected)
+        self.assertFalse(NetworkMonitor(usb_checker=USBAdapterChecker(policy_path=os.path.join(d, "missing.json"))).override_active)

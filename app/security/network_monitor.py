@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, TypeAlias
 
 from app.security.usb_checker import STATUS_APPROVED, USBAdapterChecker
@@ -21,6 +22,21 @@ STOPPING = "STOPPING"
 ERROR = "ERROR"
 
 FlowKey: TypeAlias = tuple[str, str, int | None, int | None, str]
+
+
+_GUID = re.compile(r"\{[0-9A-Fa-f-]{36}\}")
+
+
+def _guid(value) -> str:
+    """Lower-case {GUID} found anywhere in the text (handles \\Device\\NPF_{GUID}), else ''."""
+    match = _GUID.search(str(value or ""))
+    return match.group(0).casefold() if match else ""
+
+
+def _mac(value) -> str:
+    """12 lower-case hex digits for a MAC written with any separators, else ''."""
+    digits = re.sub(r"[^0-9a-fA-F]", "", str(value or "")).casefold()
+    return digits if len(digits) == 12 else ""
 
 
 class NetworkMonitorError(RuntimeError):
@@ -262,6 +278,19 @@ class NetworkMonitor:
         thread = getattr(sniffer, "thread", None) if sniffer is not None else None
         return bool(thread is not None and thread.is_alive())
 
+    @property
+    def override_active(self) -> bool:
+        """True when config/device_policy.json sets allow_unapproved_interface_monitoring (testing only)."""
+        try:
+            path = getattr(self.usb_checker, "policy_path", None)
+            if path is None:
+                return False
+            import json
+            data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+            return data.get("allow_unapproved_interface_monitoring") is True
+        except Exception:
+            return False
+
     def discover_interfaces(self) -> list[NetworkInterface]:
         """List interfaces and mark only the USB-checker-matched interface approved."""
         logger.info("Discovering network interfaces")
@@ -295,6 +324,12 @@ class NetworkMonitor:
                 )
                 if value
             }
+            guid = _guid(getattr(approval, "interface_guid", None))
+            mac = _mac(getattr(approval, "mac_address", None))
+            if guid:
+                approved_names.add(guid)
+            if mac:
+                approved_names.add(mac)
 
         marked = [
             NetworkInterface(
@@ -317,8 +352,13 @@ class NetworkMonitor:
             elif not marked:
                 self._selection_error = "No network interfaces were found."
             elif approval and approval.status == STATUS_APPROVED:
+                seen = ", ".join(item.name for item in marked[:8])
+                looking = ", ".join(sorted(v for v in approved_names if v)[:4])
                 self._selection_error = (
-                    "The approved USB adapter was found, but its Scapy interface could not be matched."
+                    "The approved USB adapter was found, but its Scapy interface could not be matched. "
+                    f"Looking for: {looking or 'n/a'}. Npcap/Scapy sees: {seen}. "
+                    "Try: re-plug the adapter and press Refresh Interface; reinstall Npcap (tick 'WinPcap API-compatible "
+                    "mode'); or set allow_unapproved_interface_monitoring in config/device_policy.json for testing."
                 )
             else:
                 self._selection_error = approval_reason or "No approved USB Wi-Fi interface is available."
@@ -337,6 +377,9 @@ class NetworkMonitor:
 
         interfaces = self.discover_interfaces()
         approved_interfaces = [item for item in interfaces if item.approved]
+        if self.override_active:  # explicit local-policy opt-in (visible on screen, logged)
+            logger.warning("Policy override: monitoring may use an interface that is NOT the approved USB adapter")
+            approved_interfaces = list(interfaces)
         selected = self._resolve_interface(interface, approved_interfaces)
         if selected is None:
             message = self.selection_error or "No approved USB Wi-Fi interface is available."
@@ -536,7 +579,11 @@ class NetworkMonitor:
             interface.capture_name.strip().casefold(),
             (interface.description or "").strip().casefold(),
             (interface.interface_id or "").strip().casefold(),
+            _guid(interface.interface_id),
+            _guid(interface.capture_name),  # \Device\NPF_{GUID}
+            _mac(interface.mac_address),
         }
+        candidates.discard("")
         return bool(candidates & approved_names)
 
     @staticmethod
@@ -569,6 +616,10 @@ class NetworkMonitor:
     def _scapy_interface_provider() -> list[dict[str, str | None]]:
         from scapy.all import conf
 
+        try:
+            conf.ifaces.reload()  # Scapy caches the list at import; re-read so replugged adapters appear
+        except Exception:
+            logger.debug("Scapy interface reload failed; using the cached list", exc_info=True)
         interfaces: list[dict[str, str | None]] = []
         for interface in conf.ifaces.values():
             name = str(getattr(interface, "name", "") or "").strip()

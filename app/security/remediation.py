@@ -72,6 +72,11 @@ _ADVICE: dict[str, Advice] = {
         ("If you started it on purpose, close it while working, or ask IT to approve it and then switch it on in the Apps tab.",
          "If you do not recognise it, close it, run a full Windows Security (Defender) scan, and uninstall it if it is not needed.",
          "Only install software from sources your company approves.") + _COMMON_END[:1]),
+    "WEBSITE_FILTER": Advice(
+        "The website filter's Windows proxy setting was changed by something other than SecureWork AI, and was switched back.",
+        ("If you changed your proxy or network settings yourself, you can ignore this or turn website blocking off in the Websites tab.",
+         "If you did not, a program may be trying to get around the filter: run a full Windows Security (Defender) scan.",
+         "Check Windows Settings > Network & Internet > Proxy to see that it points at 127.0.0.1.") + _COMMON_END[:1]),
     "TEST": Advice(
         "This is a test alert to show how alerts look. Nothing was detected.",
         ("No action needed.",)),

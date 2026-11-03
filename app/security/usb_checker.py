@@ -26,7 +26,8 @@ try {
     $adapters = @(Get-CimInstance -Namespace 'root/StandardCimv2' `
         -ClassName 'MSFT_NetAdapter' -ErrorAction Stop |
         Select-Object InterfaceName, InterfaceDescription, PNPDeviceID,
-                      NdisPhysicalMedium, HardwareInterface, Virtual)
+                      NdisPhysicalMedium, HardwareInterface, Virtual,
+                      InterfaceGuid, PermanentAddress)
     ConvertTo-Json -InputObject $adapters -Compress -Depth 3
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
@@ -49,6 +50,8 @@ class USBAdapterStatus:
     connection_type: str = "unknown"
     reason: str = ""
     error: str | None = None
+    interface_guid: str | None = None
+    mac_address: str | None = None
 
 
 class USBAdapterChecker:
@@ -233,6 +236,8 @@ class USBAdapterChecker:
             "interface_description": str(name) if name else None,
             "device_id": str(device_id) if device_id else None,
             "connection_type": "USB" if is_usb else "unknown",
+            "interface_guid": str(USBAdapterChecker._get(record, "InterfaceGuid") or "") or None,
+            "mac_address": str(USBAdapterChecker._get(record, "PermanentAddress") or "") or None,
         }
 
         try:
@@ -304,6 +309,8 @@ class USBAdapterChecker:
             device_id=adapter["device_id"],
             connection_type="USB",
             reason=reason,
+            interface_guid=adapter.get("interface_guid"),
+            mac_address=adapter.get("mac_address"),
         )
 
     @staticmethod
@@ -324,4 +331,6 @@ class USBAdapterChecker:
             connection_type=str(adapter.get("connection_type") or "unknown"),
             reason=reason,
             error=error,
+            interface_guid=adapter.get("interface_guid"),
+            mac_address=adapter.get("mac_address"),
         )

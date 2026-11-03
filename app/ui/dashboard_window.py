@@ -23,6 +23,7 @@ from app.security.app_monitor import check_running, running_exe_names
 from app.security.remediation import AlertInfo
 from app.security.verification import VerificationState, is_fully_verified, run_checks
 from app.ui.alert_dialog import AlertDialog
+from app.ui.websites_panel import WebsitesPanel
 from app.ui.workspace_window import WorkspacePanel
 from app.ui import theme
 from app.ui.protocol_chart import ProtocolPieChart
@@ -145,6 +146,7 @@ class DashboardWindow(QMainWindow):
         self.setWindowTitle("SecureWork AI | Dashboard")
         self.setMinimumSize(1100, 720)
         self._build_ui(username)
+        self.websites_panel.apply_saved_state()
         theme.signals.changed.connect(self._on_theme_changed)
 
         self._app_monitor_timer = QTimer(self)
@@ -187,7 +189,7 @@ class DashboardWindow(QMainWindow):
         sb.addLayout(brand_row)
         sb.addSpacing(22)
         self._nav_buttons: list[QPushButton] = []
-        for index, label in enumerate(["Overview", "Network", "Detection", "Apps", "Alerts", "System"]):
+        for index, label in enumerate(["Overview", "Network", "Detection", "Apps", "Websites", "Alerts", "System"]):
             btn = QPushButton(label)
             btn.setObjectName("navButton")
             btn.setCheckable(True)
@@ -251,6 +253,11 @@ class DashboardWindow(QMainWindow):
         self.workspace_panel.changed.connect(self._on_allowlist_changed)
         self.workspace_panel.monitor_toggle.toggled.connect(self._toggle_app_monitor)
         self.pages.addWidget(self.workspace_panel)
+        self.websites_panel = WebsitesPanel()
+        self.websites_panel.tampered.connect(lambda: self.raise_alert(AlertInfo(
+            "WEBSITE_FILTER", "medium", "Website filter setting was changed",
+            "The Windows proxy setting was changed and has been switched back.", "system", "proxy")))
+        self.pages.addWidget(self.websites_panel)
         self.pages.addWidget(self._scroll(self._page_alerts()))
         self.pages.addWidget(self._scroll(self._page_system()))
         main.addWidget(self.pages, 1)
@@ -271,7 +278,7 @@ class DashboardWindow(QMainWindow):
         self._refresh_overview()
 
     def _show_page(self, index: int) -> None:
-        names = ["Overview", "Network", "Detection", "Apps", "Alerts", "System"]
+        names = ["Overview", "Network", "Detection", "Apps", "Websites", "Alerts", "System"]
         self.pages.setCurrentIndex(index)
         self.page_title.setText(names[index])
         for i, btn in enumerate(self._nav_buttons):
@@ -1050,6 +1057,20 @@ class DashboardWindow(QMainWindow):
                 )
                 if interface.approved and approved_index is None:
                     approved_index = index
+        override = getattr(getattr(self, "network_monitor", None), "override_active", False) is True
+        if approved_index is None and override and interfaces:
+            # Local policy explicitly allows testing on a non-approved interface: prefer a Wi-Fi/Ethernet NIC.
+            preferred = next((i for i, it in enumerate(interfaces)
+                              if any(k in (it.display_name + (it.description or "")).casefold()
+                                     for k in ("wi-fi", "wireless", "ethernet")) and "virtual" not in (it.description or "").casefold()), 0)
+            self.network_interface_combo.setCurrentIndex(preferred)
+            self.network_error_label.setText(
+                "Policy override is ON (allow_unapproved_interface_monitoring): monitoring may use a NON-approved "
+                "interface. For testing only."
+            )
+            self.start_monitoring_button.setEnabled(True)
+            self.refresh_interfaces_button.setEnabled(True)
+            return
         if approved_index is not None:
             # Scapy may list WAN Miniports before the approved USB adapter.
             # This is only a UI default; start_capture verifies approval again.
@@ -1073,7 +1094,8 @@ class DashboardWindow(QMainWindow):
 
     def start_network_monitoring(self) -> None:
         selected = self.network_interface_combo.currentData()
-        if not isinstance(selected, NetworkInterface) or not selected.approved:
+        override = getattr(getattr(self, "network_monitor", None), "override_active", False) is True
+        if not isinstance(selected, NetworkInterface) or (not selected.approved and not override):
             self.network_error_label.setText(
                 "Select an approved USB Wi-Fi interface before starting monitoring."
             )
@@ -1166,7 +1188,8 @@ class DashboardWindow(QMainWindow):
             self.network_error_label.setText(self.network_monitor.last_error)
         active = self.network_monitor.is_active()
         selected_item = self.network_interface_combo.currentData()
-        can_start = isinstance(selected_item, NetworkInterface) and selected_item.approved
+        override = getattr(getattr(self, "network_monitor", None), "override_active", False) is True
+        can_start = isinstance(selected_item, NetworkInterface) and (selected_item.approved or override)
         if status != "ERROR" and not active and not can_start and not self._network_action_busy:
             self.network_error_label.setText(
                 self.network_monitor.selection_error
@@ -1185,7 +1208,7 @@ class DashboardWindow(QMainWindow):
         self._raise_new_alerts()
         self._refresh_overview()
         self._refresh_verification()
-        if self._history_dirty and self.pages.currentIndex() == 4:
+        if self._history_dirty and self.pages.currentIndex() == 5:
             self._render_alert_history()
         if self.email_notifier.status != getattr(self, "_last_email_status", None):
             self._last_email_status = self.email_notifier.status
@@ -1360,4 +1383,5 @@ class DashboardWindow(QMainWindow):
         self.flow_aggregator.finalize_all("dashboard_closed")
         self.network_monitor.remove_packet_callback(self._packet_callback)
         self.packet_pipeline.stop()
+        self.websites_panel.controller.shutdown()  # put the user's internet settings back
         event.accept()
