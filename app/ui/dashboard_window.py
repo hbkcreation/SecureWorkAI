@@ -1,17 +1,23 @@
-"""Placeholder SecureWork AI dashboard."""
+"""SecureWork AI dashboard: sidebar navigation, live KPIs, charts and detection panels."""
 import logging
 
-from PySide6.QtCore import QObject, QRunnable, Qt, Signal, Slot, QThreadPool, QTimer
+import time
+
+from PySide6.QtCore import QObject, QPropertyAnimation, QRunnable, Qt, Signal, Slot, QThreadPool, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
-    QListWidget, QScrollArea, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMainWindow, QPushButton,
+    QListWidget, QListWidgetItem, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 from app.ml.predict import DEFAULT_MODEL_PATH
 from app.security.flow_aggregator import LiveFlowAggregator
 from app.security.ids_service import FeatureCompatibilityError, IDSService
 from app.security.network_monitor import NetworkInterface, NetworkMonitor
 from app.security.rule_ids import ProtocolCounter, RuleBasedIDS
+from app.ml.live_synthetic import LiveMLAnalyzer
+from app.ui import theme
 from app.ui.protocol_chart import ProtocolPieChart
+from app.ui.widgets import Avatar, KpiCard, LogoMark, Sparkline, Toggle, card, make_chip, set_chip
 from app.security.usb_checker import USBAdapterChecker, USBAdapterStatus, STATUS_APPROVED
 
 logger = logging.getLogger(__name__)
@@ -81,13 +87,15 @@ class DashboardWindow(QMainWindow):
         on_logout,
         usb_checker: USBAdapterChecker | None = None,
         network_monitor: NetworkMonitor | None = None,
+        username: str = "",
     ) -> None:
         super().__init__()
         self._on_logout = on_logout
         self._usb_checker = usb_checker or USBAdapterChecker()
         self.network_monitor = network_monitor or NetworkMonitor(usb_checker=self._usb_checker)
         self.ids_service = IDSService(DEFAULT_MODEL_PATH)
-        self.flow_aggregator = LiveFlowAggregator(on_flow_completed=self.ids_service.inspect_completed_flow)
+        self.ml_analyzer = LiveMLAnalyzer()
+        self.flow_aggregator = LiveFlowAggregator(on_flow_completed=self._on_flow_completed)
         self._packet_callback = self.flow_aggregator.process_packet
         self.network_monitor.add_packet_callback(self._packet_callback)
         self.rule_ids = RuleBasedIDS()
@@ -108,146 +116,183 @@ class DashboardWindow(QMainWindow):
         self._close_pending = False
         self._thread_pool = QThreadPool.globalInstance()
         self.setWindowTitle("SecureWork AI | Dashboard")
-        self.setMinimumSize(720, 520)
+        self.setMinimumSize(1100, 720)
+        self._build_ui(username)
+        theme.signals.changed.connect(self._on_theme_changed)
 
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(36, 32, 36, 32)
-        layout.setSpacing(18)
+        self._network_timer = QTimer(self)
+        self._network_timer.timeout.connect(self._refresh_network_snapshot)
+        self._network_timer.start(400)
+        self._load_ids_model()
+        self._load_recent_events()
+        self._refresh_system_status()
+        self.refresh_usb_status()
+        self.refresh_network_interfaces()
 
-        title = QLabel("SecureWork AI")
-        title.setObjectName("pageTitle")
-        subtitle = QLabel("Workspace security overview")
-        subtitle.setObjectName("muted")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self, username: str) -> None:
+        root = QWidget()
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        ids_card = QFrame()
-        ids_card.setObjectName("statusCard")
-        ids_layout = QVBoxLayout(ids_card)
-        ids_heading = QLabel("Intrusion Detection System")
-        ids_heading.setObjectName("cardHeading")
-        self.ids_model_status_label = QLabel("Model: Checking saved artifact...")
-        self.ids_model_status_label.setObjectName("statusValue")
-        self.ids_inference_status_label = QLabel(
-            "Live IDS inference unavailable: feature compatibility incomplete."
-        )
-        self.ids_inference_status_label.setWordWrap(True)
-        self.ids_monitoring_status_label = QLabel("Monitoring: STOPPED")
-        self.ids_flow_count_label = QLabel("Completed flows checked: 0")
-        self.ids_detection_count_label = QLabel("Attack signals: unavailable (inference disabled)")
-        self.ids_latest_event_label = QLabel("Latest event: none; no compatible live predictions")
-        self.ids_latest_event_label.setWordWrap(True)
-        self.ids_event_log = QListWidget()
-        self.ids_event_log.setMaximumHeight(110)
-        self.ids_event_log.addItem("No prediction events; live inference is unavailable.")
-        ids_buttons = QHBoxLayout()
-        self.start_ids_button = QPushButton("Start IDS Analysis")
-        self.stop_ids_button = QPushButton("Stop IDS Analysis")
-        self.start_ids_button.setEnabled(False)
-        self.stop_ids_button.setEnabled(False)
-        self.start_ids_button.setText("Start ML analysis (unavailable)")
-        self.stop_ids_button.setText("Stop ML analysis")
-        self.start_ids_button.setToolTip("ML analysis stays disabled until all model features have verified live semantics. The rule-based IDS below runs without it.")
-        self.stop_ids_button.setToolTip("No compatible live IDS analysis is active.")
-        self.start_ids_button.clicked.connect(self.start_ids_analysis)
-        self.stop_ids_button.clicked.connect(self.stop_ids_analysis)
-        ids_buttons.addWidget(self.start_ids_button)
-        ids_buttons.addWidget(self.stop_ids_button)
-        for widget in (
-            ids_heading,
-            self.ids_model_status_label,
-            self.ids_inference_status_label,
-            self.ids_monitoring_status_label,
-            self.ids_flow_count_label,
-            self.ids_detection_count_label,
-            self.ids_latest_event_label,
-        ):
-            ids_layout.addWidget(widget)
-        ids_layout.addWidget(QLabel("Recent IDS events"))
-        ids_layout.addWidget(self.ids_event_log)
-        ids_layout.addLayout(ids_buttons)
-        layout.addWidget(ids_card)
+        # ---- sidebar
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(232)
+        sb = QVBoxLayout(sidebar)
+        sb.setContentsMargins(16, 22, 16, 18)
+        sb.setSpacing(6)
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        brand_row.addWidget(LogoMark(34))
+        brand_col = QVBoxLayout()
+        brand_col.setSpacing(0)
+        brand = QLabel("SecureWork AI")
+        brand.setObjectName("brand")
+        tag = QLabel("Protected workspace")
+        tag.setObjectName("muted")
+        brand_col.addWidget(brand)
+        brand_col.addWidget(tag)
+        brand_row.addLayout(brand_col, 1)
+        sb.addLayout(brand_row)
+        sb.addSpacing(22)
+        self._nav_buttons: list[QPushButton] = []
+        for index, label in enumerate(["Overview", "Network", "Detection", "System"]):
+            btn = QPushButton(label)
+            btn.setObjectName("navButton")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, i=index: self._show_page(i))
+            sb.addWidget(btn)
+            self._nav_buttons.append(btn)
+        sb.addStretch(1)
+        footer = QLabel("Alerts are signals to look into, not proof that something is wrong.")
+        footer.setObjectName("muted")
+        footer.setWordWrap(True)
+        sb.addWidget(footer)
+        logout = QPushButton("Sign out")
+        logout.setObjectName("secondaryButton")
+        logout.setCursor(Qt.PointingHandCursor)
+        logout.clicked.connect(self._request_logout)
+        sb.addWidget(logout)
+        outer.addWidget(sidebar)
 
-        rule_card = QFrame()
-        rule_card.setObjectName("statusCard")
-        rule_layout = QVBoxLayout(rule_card)
-        rule_heading = QLabel("Live Intrusion Detection (rule-based)")
-        rule_heading.setObjectName("cardHeading")
-        self.rule_ids_status_label = QLabel("Rule-based IDS: waiting for monitoring to start")
-        self.rule_ids_status_label.setObjectName("statusValue")
-        rule_note = QLabel(
-            "Detects port scans, SYN floods and abnormal packet rates from live packet metadata. "
-            "Alerts are signals, not proof of compromise. The ML model remains gated."
-        )
-        rule_note.setObjectName("muted")
-        rule_note.setWordWrap(True)
-        self.rule_ids_log = QListWidget()
-        self.rule_ids_log.setMaximumHeight(110)
-        self.rule_ids_log.addItem("No rule-based alerts.")
-        rule_layout.addWidget(rule_heading)
-        rule_layout.addWidget(self.rule_ids_status_label)
-        rule_layout.addWidget(rule_note)
-        rule_layout.addWidget(self.rule_ids_log)
-        self.rule_ids_pause_button = QPushButton("Pause rule-based IDS")
-        self.rule_ids_pause_button.setCheckable(True)
-        self.rule_ids_pause_button.setObjectName("secondaryButton")
-        self.rule_ids_pause_button.toggled.connect(self._toggle_rule_ids_pause)
-        rule_layout.addWidget(self.rule_ids_pause_button)
-        layout.addWidget(rule_card)
+        # ---- main column: top bar + pages
+        main = QVBoxLayout()
+        main.setContentsMargins(26, 20, 26, 20)
+        main.setSpacing(16)
+        top = QHBoxLayout()
+        self.page_title = QLabel("Overview")
+        self.page_title.setObjectName("pageTitle")
+        top.addWidget(self.page_title)
+        top.addStretch(1)
+        self.chip_capture = make_chip("Capture: stopped")
+        self.chip_rules = make_chip("Rule IDS: idle")
+        self.chip_ml = make_chip("ML: off")
+        for chip in (self.chip_capture, self.chip_rules, self.chip_ml):
+            top.addWidget(chip)
+        top.addSpacing(8)
+        self.theme_toggle = Toggle(theme.mode() == "dark")
+        self.theme_toggle.setToolTip("Switch between light and dark mode")
+        self.theme_toggle.toggled.connect(lambda on: theme.apply("dark" if on else "light"))
+        mode_label = QLabel("Dark mode")
+        mode_label.setObjectName("muted")
+        top.addWidget(mode_label)
+        top.addWidget(self.theme_toggle)
+        top.addSpacing(10)
+        who = QVBoxLayout()
+        who.setSpacing(0)
+        name_label = QLabel(username or "Signed in")
+        name_label.setStyleSheet("font-weight:600;")
+        role_label = QLabel("Signed in")
+        role_label.setObjectName("muted")
+        who.addWidget(name_label, alignment=Qt.AlignRight)
+        who.addWidget(role_label, alignment=Qt.AlignRight)
+        top.addLayout(who)
+        top.addWidget(Avatar(username))
+        main.addLayout(top)
 
-        chart_card = QFrame()
-        chart_card.setObjectName("statusCard")
-        chart_layout = QVBoxLayout(chart_card)
-        chart_heading = QLabel("Live packets by protocol")
-        chart_heading.setObjectName("cardHeading")
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._scroll(self._page_overview()))
+        self.pages.addWidget(self._scroll(self._page_network()))
+        self.pages.addWidget(self._scroll(self._page_detection()))
+        self.pages.addWidget(self._scroll(self._page_system()))
+        main.addWidget(self.pages, 1)
+        outer.addLayout(main, 1)
+        self.setCentralWidget(root)
+        self._show_page(0)
+
+    @staticmethod
+    def _scroll(content: QWidget) -> QScrollArea:
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setWidget(content)
+        return area
+
+    def _on_theme_changed(self, _mode: str) -> None:
+        self.signal_feed.clear()  # re-colour the feed for the new theme on the next refresh
+        self._refresh_overview()
+
+    def _show_page(self, index: int) -> None:
+        names = ["Overview", "Network", "Detection", "System"]
+        self.pages.setCurrentIndex(index)
+        self.page_title.setText(names[index])
+        for i, btn in enumerate(self._nav_buttons):
+            btn.setChecked(i == index)
+        page = self.pages.currentWidget()
+        effect = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(260)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.finished.connect(lambda: page.setGraphicsEffect(None))
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
+
+    def _page_overview(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(16)
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        self.kpi_packets = KpiCard("Packets captured", "accent")
+        self.kpi_flows = KpiCard("Flows completed", "ok")
+        self.kpi_rules = KpiCard("Rule alerts", "warn")
+        self.kpi_ml = KpiCard("ML flagged flows", "bad")
+        for k in (self.kpi_packets, self.kpi_flows, self.kpi_rules, self.kpi_ml):
+            row.addWidget(k)
+        lay.addLayout(row)
+
+        mid = QHBoxLayout()
+        mid.setSpacing(14)
+        c1, l1 = card("Live packets by protocol")
         self.protocol_chart = ProtocolPieChart()
-        chart_layout.addWidget(chart_heading)
-        chart_layout.addWidget(self.protocol_chart)
-        layout.addWidget(chart_card)
+        l1.addWidget(self.protocol_chart, 1)
+        c2, l2 = card("Traffic rate")
+        self.rate_chart = Sparkline()
+        l2.addWidget(self.rate_chart, 1)
+        mid.addWidget(c1, 1)
+        mid.addWidget(c2, 1)
+        lay.addLayout(mid)
 
-        system_card = QFrame()
-        system_card.setObjectName("statusCard")
-        system_layout = QVBoxLayout(system_card)
-        system_heading = QLabel("System Status")
-        system_heading.setObjectName("cardHeading")
-        self.system_status_label = QLabel("Not verified")
-        self.system_status_label.setObjectName("statusValue")
-        self.system_status_details_label = QLabel()
-        self.system_status_details_label.setObjectName("muted")
-        self.system_status_details_label.setWordWrap(True)
-        system_layout.addWidget(system_heading)
-        system_layout.addWidget(self.system_status_label)
-        system_layout.addWidget(self.system_status_details_label)
-        layout.addWidget(system_card)
+        c3, l3 = card("Latest alerts")
+        self.signal_feed = QListWidget()
+        self.signal_feed.setMinimumHeight(190)
+        self.signal_feed.addItem("Nothing to report yet. Start monitoring and alerts will show up here.")
+        l3.addWidget(self.signal_feed)
+        lay.addWidget(c3)
+        lay.addStretch(1)
+        return page
 
-        usb_card = QFrame()
-        usb_card.setObjectName("statusCard")
-        usb_layout = QVBoxLayout(usb_card)
-        usb_header = QHBoxLayout()
-        usb_heading = QLabel("USB Wi-Fi Adapter")
-        usb_heading.setObjectName("cardHeading")
-        self.usb_refresh_button = QPushButton("Refresh")
-        self.usb_refresh_button.setObjectName("secondaryButton")
-        self.usb_refresh_button.clicked.connect(self.refresh_usb_status)
-        usb_header.addWidget(usb_heading)
-        usb_header.addStretch(1)
-        usb_header.addWidget(self.usb_refresh_button)
-        self.usb_status_label = QLabel("Status: CHECKING")
-        self.usb_status_label.setObjectName("statusValue")
-        self.usb_details_label = QLabel("Windows adapter information is being checked.")
-        self.usb_details_label.setObjectName("muted")
-        self.usb_details_label.setWordWrap(True)
-        usb_layout.addLayout(usb_header)
-        usb_layout.addWidget(self.usb_status_label)
-        usb_layout.addWidget(self.usb_details_label)
-        layout.addWidget(usb_card)
-
-        network_card = QFrame()
-        network_card.setObjectName("statusCard")
-        network_layout = QVBoxLayout(network_card)
-        network_heading = QLabel("Network Monitoring")
-        network_heading.setObjectName("cardHeading")
+    def _page_network(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(16)
+        network_card, nl = card("Network monitoring")
         self.network_status_label = QLabel("Status: STOPPED")
         self.network_status_label.setObjectName("statusValue")
         self.network_interface_combo = QComboBox()
@@ -259,44 +304,229 @@ class DashboardWindow(QMainWindow):
         self.network_error_label = QLabel(" ")
         self.network_error_label.setObjectName("message")
         self.network_error_label.setWordWrap(True)
-        network_buttons = QHBoxLayout()
+        buttons = QHBoxLayout()
         self.start_monitoring_button = QPushButton("Start Monitoring")
         self.stop_monitoring_button = QPushButton("Stop Monitoring")
         self.refresh_interfaces_button = QPushButton("Refresh Interface")
+        self.refresh_interfaces_button.setObjectName("secondaryButton")
         self.start_monitoring_button.clicked.connect(self.start_network_monitoring)
         self.stop_monitoring_button.clicked.connect(self.stop_network_monitoring)
         self.refresh_interfaces_button.clicked.connect(self.refresh_network_interfaces)
-        network_buttons.addWidget(self.start_monitoring_button)
-        network_buttons.addWidget(self.stop_monitoring_button)
-        network_buttons.addWidget(self.refresh_interfaces_button)
-        network_layout.addWidget(network_heading)
-        network_layout.addWidget(self.network_status_label)
-        network_layout.addWidget(self.network_interface_combo)
-        network_layout.addWidget(self.network_interface_label)
-        network_layout.addWidget(self.network_packet_count_label)
-        network_layout.addWidget(self.network_flow_count_label)
-        network_layout.addWidget(self.network_error_label)
-        network_layout.addLayout(network_buttons)
-        layout.addWidget(network_card)
+        for b in (self.start_monitoring_button, self.stop_monitoring_button, self.refresh_interfaces_button):
+            buttons.addWidget(b)
+        for w in (self.network_status_label, self.network_interface_combo, self.network_interface_label,
+                  self.network_packet_count_label, self.network_flow_count_label, self.network_error_label):
+            nl.addWidget(w)
+        nl.addLayout(buttons)
+        lay.addWidget(network_card)
+        lay.addStretch(1)
+        return page
 
-        layout.addStretch(1)
-        logout = QPushButton("Logout")
-        logout.setObjectName("secondaryButton")
-        logout.clicked.connect(self._request_logout)
-        layout.addWidget(logout, alignment=Qt.AlignRight)
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(central)
-        self.setCentralWidget(scroll_area)
+    def _page_detection(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(16)
 
-        self._network_timer = QTimer(self)
-        self._network_timer.timeout.connect(self._refresh_network_snapshot)
-        self._network_timer.start(400)
-        self._load_ids_model()
-        self._load_recent_events()
-        self._refresh_system_status()
-        self.refresh_usb_status()
-        self.refresh_network_interfaces()
+        # Rule-based IDS
+        rule_card, rl = card("Rule-based live IDS")
+        self.rule_ids_status_label = QLabel("Rule-based IDS: waiting for monitoring to start")
+        self.rule_ids_status_label.setObjectName("statusValue")
+        note = QLabel("Detects port scans, SYN floods and abnormal packet rates from live packet metadata.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        self.rule_ids_log = QListWidget()
+        self.rule_ids_log.setMaximumHeight(130)
+        self.rule_ids_log.addItem("No rule-based alerts.")
+        self.rule_ids_pause_button = QPushButton("Pause rule-based IDS")
+        self.rule_ids_pause_button.setCheckable(True)
+        self.rule_ids_pause_button.setObjectName("secondaryButton")
+        self.rule_ids_pause_button.toggled.connect(self._toggle_rule_ids_pause)
+        for w in (self.rule_ids_status_label, note, self.rule_ids_log, self.rule_ids_pause_button):
+            rl.addWidget(w)
+        lay.addWidget(rule_card)
+
+        # ML (Random Forest, synthetic-trained)
+        ml_card, ml = card("ML analysis (Random Forest)")
+        self.ml_status_label = QLabel("ML analysis: OFF")
+        self.ml_status_label.setObjectName("statusValue")
+        self.ml_counts_label = QLabel("Flows scored: 0 | flagged: 0")
+        caveat = QLabel(
+            "This model was trained on made-up (synthetic) traffic, not real attacks, so treat its results as a "
+            "hint rather than a verdict. It checks finished connections, so monitoring needs to be running."
+        )
+        caveat.setObjectName("muted")
+        caveat.setWordWrap(True)
+        self.ml_log = QListWidget()
+        self.ml_log.setMaximumHeight(130)
+        self.ml_log.addItem("No ML events yet.")
+        mlb = QHBoxLayout()
+        self.ml_start_button = QPushButton("Start ML analysis")
+        self.ml_stop_button = QPushButton("Stop ML analysis")
+        self.ml_stop_button.setObjectName("secondaryButton")
+        self.ml_stop_button.setEnabled(False)
+        self.ml_start_button.clicked.connect(self.start_ml_analysis)
+        self.ml_stop_button.clicked.connect(self.stop_ml_analysis)
+        mlb.addWidget(self.ml_start_button)
+        mlb.addWidget(self.ml_stop_button)
+        for w in (self.ml_status_label, self.ml_counts_label, caveat, self.ml_log):
+            ml.addWidget(w)
+        ml.addLayout(mlb)
+        lay.addWidget(ml_card)
+
+        # Legacy UNSW-NB15 model (gated)
+        ids_card, il = card("UNSW-NB15 model (gated)")
+        self.ids_model_status_label = QLabel("Model: Checking saved artifact...")
+        self.ids_model_status_label.setObjectName("statusValue")
+        self.ids_inference_status_label = QLabel("Live IDS inference unavailable: feature compatibility incomplete.")
+        self.ids_inference_status_label.setObjectName("muted")
+        self.ids_inference_status_label.setWordWrap(True)
+        self.ids_monitoring_status_label = QLabel("Monitoring: STOPPED")
+        self.ids_flow_count_label = QLabel("Completed flows checked: 0")
+        self.ids_detection_count_label = QLabel("Attack signals: unavailable (inference disabled)")
+        self.ids_latest_event_label = QLabel("Latest event: none; no compatible live predictions")
+        self.ids_latest_event_label.setWordWrap(True)
+        self.ids_event_log = QListWidget()
+        self.ids_event_log.setMaximumHeight(110)
+        self.ids_event_log.addItem("No prediction events; live inference is unavailable.")
+        ib = QHBoxLayout()
+        self.start_ids_button = QPushButton("Start UNSW analysis")
+        self.stop_ids_button = QPushButton("Stop UNSW analysis")
+        self.stop_ids_button.setObjectName("secondaryButton")
+        self.start_ids_button.setEnabled(False)
+        self.stop_ids_button.setEnabled(False)
+        self.start_ids_button.setToolTip("Disabled until all UNSW-NB15 model features have verified live semantics. "
+                                         "Use the Random Forest analysis above instead.")
+        self.start_ids_button.clicked.connect(self.start_ids_analysis)
+        self.stop_ids_button.clicked.connect(self.stop_ids_analysis)
+        ib.addWidget(self.start_ids_button)
+        ib.addWidget(self.stop_ids_button)
+        for w in (self.ids_model_status_label, self.ids_inference_status_label, self.ids_monitoring_status_label,
+                  self.ids_flow_count_label, self.ids_detection_count_label, self.ids_latest_event_label,
+                  self.ids_event_log):
+            il.addWidget(w)
+        il.addLayout(ib)
+        lay.addWidget(ids_card)
+        lay.addStretch(1)
+        return page
+
+    def _page_system(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 8, 0)
+        lay.setSpacing(16)
+        system_card, sl = card("System status")
+        self.system_status_label = QLabel("Not verified")
+        self.system_status_label.setObjectName("statusValue")
+        self.system_status_details_label = QLabel()
+        self.system_status_details_label.setObjectName("muted")
+        self.system_status_details_label.setWordWrap(True)
+        sl.addWidget(self.system_status_label)
+        sl.addWidget(self.system_status_details_label)
+        lay.addWidget(system_card)
+
+        usb_card, ul = card("USB Wi-Fi adapter")
+        self.usb_status_label = QLabel("Status: CHECKING")
+        self.usb_status_label.setObjectName("statusValue")
+        self.usb_details_label = QLabel("Windows adapter information is being checked.")
+        self.usb_details_label.setObjectName("muted")
+        self.usb_details_label.setWordWrap(True)
+        self.usb_refresh_button = QPushButton("Refresh")
+        self.usb_refresh_button.setObjectName("secondaryButton")
+        self.usb_refresh_button.clicked.connect(self.refresh_usb_status)
+        for w in (self.usb_status_label, self.usb_details_label):
+            ul.addWidget(w)
+        ul.addWidget(self.usb_refresh_button, alignment=Qt.AlignLeft)
+        lay.addWidget(usb_card)
+        lay.addStretch(1)
+        return page
+
+    # ------------------------------------------------------------- ML control
+    def start_ml_analysis(self) -> None:
+        if self.ml_analyzer.active:
+            return
+        self.ml_start_button.setEnabled(False)
+        self.ml_status_label.setText("ML analysis: preparing model (first run trains it, a few seconds)...")
+        worker = _ActionWorker(self.ml_analyzer.load_or_train)
+        self._action_workers.add(worker)
+        worker.signals.finished.connect(lambda result, error, w=worker: self._ml_ready(w, result, error))
+        self._thread_pool.start(worker)
+
+    def _ml_ready(self, worker, result, error) -> None:
+        self._action_workers.discard(worker)
+        if error is not None:
+            logger.error("ML model unavailable: %s", error)
+            self.ml_status_label.setText(f"ML analysis: unavailable ({error})")
+            self.ml_start_button.setEnabled(True)
+            return
+        self.ml_analyzer.start()
+        self.ml_stop_button.setEnabled(True)
+        self._refresh_ml()
+
+    def stop_ml_analysis(self) -> None:
+        self.ml_analyzer.stop()
+        self.ml_stop_button.setEnabled(False)
+        self.ml_start_button.setEnabled(True)
+        self._refresh_ml()
+
+    def _refresh_ml(self) -> None:
+        a = self.ml_analyzer
+        if a.active:
+            self.ml_status_label.setText("ML analysis: ACTIVE (Random Forest, synthetic-trained)")
+        elif a.loaded:
+            self.ml_status_label.setText("ML analysis: STOPPED (model loaded)")
+        elif "preparing" not in self.ml_status_label.text() and "unavailable" not in self.ml_status_label.text():
+            self.ml_status_label.setText("ML analysis: OFF")
+        self.ml_counts_label.setText(f"Flows scored: {a.flows_scored} | flagged: {a.attack_flows}")
+        rendered = [
+            f"{e.timestamp[11:19]} | {e.label} ({e.probability:.0%}) | {e.source_ip} → {e.destination_ip}:{e.destination_port}"
+            for e in a.events[-6:] if e.label != "normal"
+        ] or ["No ML events yet."]
+        existing = [self.ml_log.item(i).text() for i in range(self.ml_log.count())]
+        if rendered != existing:
+            self.ml_log.clear()
+            self.ml_log.addItems(rendered)
+
+    # --------------------------------------------------------- overview feed
+    def _refresh_overview(self) -> None:
+        packets, flows = self.network_monitor.packet_count, self.network_monitor.flow_count
+        now = time.monotonic()
+        last_t, last_p = getattr(self, "_rate_last", (now, packets))
+        if now - last_t >= 1.0:
+            self.rate_chart.push(max(0, packets - last_p) / (now - last_t))
+            self._rate_last = (now, packets)
+        elif not hasattr(self, "_rate_last"):
+            self._rate_last = (now, packets)
+        rule_alerts = self.rule_ids.alerts
+        self.kpi_packets.set(packets, "since you started monitoring")
+        self.kpi_flows.set(flows, f"{self.ids_service.flows_checked} checked by UNSW gate")
+        self.kpi_rules.set(len(rule_alerts), "port scan · SYN flood · rate")
+        self.kpi_ml.set(self.ml_analyzer.attack_flows, f"of {self.ml_analyzer.flows_scored} scored")
+        signals = [(a.timestamp, a.severity.upper(), f"{a.rule}  {a.source_ip} → {a.target_ip}  {a.detail}") for a in rule_alerts]
+        signals += [(0.0, "ML", f"{e.label} ({e.probability:.0%})  {e.source_ip} → {e.destination_ip}:{e.destination_port}")
+                    for e in self.ml_analyzer.events if e.label != "normal"]
+        signals.sort(key=lambda s: s[0])
+        rendered = [f"{sev:<9} {text}" for _t, sev, text in signals[-8:]][::-1] or [
+            "Nothing to report yet. Start monitoring and alerts will show up here."]
+        existing = [self.signal_feed.item(i).text() for i in range(self.signal_feed.count())]
+        if rendered != existing:
+            self.signal_feed.clear()
+            for line in rendered:
+                item = QListWidgetItem(line)
+                role = {"CRITICAL": "bad", "HIGH": "bad", "MEDIUM": "warn", "ML": "accent"}.get(
+                    line.split()[0] if line.split() else "", "muted")
+                item.setForeground(QColor(theme.c(role)))
+                self.signal_feed.addItem(item)
+        set_chip(self.chip_capture, "Capture: running" if self.network_monitor.is_active() else "Capture: stopped",
+                 "ok" if self.network_monitor.is_active() else "")
+        set_chip(self.chip_rules, "Rule IDS: active" if self.rule_ids.active else "Rule IDS: idle",
+                 "ok" if self.rule_ids.active else "")
+        set_chip(self.chip_ml, "ML: active" if self.ml_analyzer.active else "ML: off",
+                 "ok" if self.ml_analyzer.active else "")
+
+    def _on_flow_completed(self, flow) -> None:
+        self.ml_analyzer.inspect_completed_flow(flow)
+        return self.ids_service.inspect_completed_flow(flow)
 
     def _load_ids_model(self) -> None:
         self._ids_model_worker = _ActionWorker(self.ids_service.load_model)
@@ -538,6 +768,8 @@ class DashboardWindow(QMainWindow):
         self._refresh_system_status()
         self._refresh_ids_snapshot()
         self._refresh_rule_ids(active)
+        self._refresh_ml()
+        self._refresh_overview()
 
     def _toggle_rule_ids_pause(self, paused: bool) -> None:
         self._rule_ids_paused = paused
